@@ -46,7 +46,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
     case "sidebar:get-session":
       return getSession(sender.tab?.id);
     case "sidebar:ask-page":
-      return askPage(sender.tab?.id, message.payload?.prompt);
+      return askPage(sender.tab?.id, message.payload?.prompt, message.payload?.selection);
     case "sidebar:get-logs":
       return getLogs();
     default:
@@ -274,7 +274,7 @@ async function ensurePageContext(tabIdFromSender) {
     });
 }
 
-async function askPage(tabIdFromSender, prompt) {
+async function askPage(tabIdFromSender, prompt, selectionFromPopup) {
   const userPrompt = String(prompt ?? "").trim();
   if (!userPrompt) {
     return createErrorResponse("empty_prompt", "请输入你的问题。");
@@ -291,8 +291,10 @@ async function askPage(tabIdFromSender, prompt) {
   }
 
   const history = await loadSession(tabId);
+  const selection = String(selectionFromPopup ?? contextResult.payload.context.selection ?? "").trim();
   const response = await sendNativeRequest("ask_page", {
     ...contextResult.payload.context,
+    selectedFocus: selection,
     userPrompt,
     conversationHistory: history,
   });

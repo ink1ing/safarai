@@ -234,6 +234,7 @@ struct LocalProviderClient {
         let url = (context["url"] as? String)?.nonEmpty ?? ""
         let article = (context["articleText"] as? String)?.nonEmpty ?? ""
         let selection = (context["selection"] as? String)?.nonEmpty ?? ""
+        let selectedFocus = (context["selectedFocus"] as? String)?.nonEmpty ?? selection
         let metadata = context["metadata"] as? [String: Any]
         let pageKind = (metadata?["pageKind"] as? String)?.nonEmpty ?? "unknown_page"
         let repository = (metadata?["repository"] as? String)?.nonEmpty
@@ -249,6 +250,7 @@ struct LocalProviderClient {
         if let repository { sections.append("repository: \(repository)") }
         if !url.isEmpty { sections.append("url: \(url)") }
         if !selection.isEmpty { sections.append("selection: \(selection)") }
+        if !selectedFocus.isEmpty { sections.append("selected_focus: \(selectedFocus)") }
         if let target { sections.append("write_target: \(target)") }
         if !history.isEmpty {
             let historyText = history.suffix(6).map { item in
@@ -264,15 +266,21 @@ struct LocalProviderClient {
         let header: String
         switch requestType {
         case "summarize_page":
-            header = "请用中文简洁总结下面页面，聚焦关键信息与结论。"
+            header = selectedFocus.isEmpty
+                ? "请用中文简洁总结下面页面，聚焦关键信息与结论。"
+                : "请用中文简洁总结下面页面，聚焦关键信息与结论，并特别说明选中内容在页面中的意义。"
         case "explain_selection":
-            header = "请用中文解释用户选中的文本，并结合页面上下文说明含义。"
+            header = "请用中文解释用户选中的文本，并结合页面上下文说明含义。若存在选中内容，请把它当成重点。"
         case "extract_structured_info":
-            header = "请用中文把当前页面提取成结构化要点，输出格式固定为：主题、关键实体、关键信息、后续动作。每项使用简洁项目符号。"
+            header = selectedFocus.isEmpty
+                ? "请用中文把当前页面提取成结构化要点，输出格式固定为：主题、关键实体、关键信息、后续动作。每项使用简洁项目符号。"
+                : "请用中文把当前页面提取成结构化要点，输出格式固定为：主题、关键实体、关键信息、后续动作。若存在选中内容，请单独补充其要点。每项使用简洁项目符号。"
         case "draft_for_input":
             header = "请用中文为当前输入框生成一份可直接粘贴的草稿，保持克制、清晰、可执行，不要添加解释。"
         case "ask_page":
-            header = "请基于当前页面上下文和最近会话，用中文直接回答用户问题。"
+            header = selectedFocus.isEmpty
+                ? "请基于当前页面上下文和最近会话，用中文直接回答用户问题。"
+                : "请基于当前页面上下文和最近会话，用中文直接回答用户问题。若存在选中内容，请先单独解释选中内容，再结合整页内容给出完整回答。"
         default:
             header = "请根据上下文回答。"
         }
