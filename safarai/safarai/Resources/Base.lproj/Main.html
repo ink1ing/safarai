@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+
+    <link rel="stylesheet" href="../Style.css">
+    <script src="../Script.js" defer></script>
+</head>
+<body>
+    <main class="container">
+        <div class="badge">Safari AI Sidebar</div>
+        <h1>Codex 账户与模型控制台</h1>
+        <p class="lead">宿主 App 直接负责 Codex OAuth 登录、单账户凭证保存和默认模型选择。扩展侧所有页面动作都会使用这里保存的账户与模型。</p>
+
+        <section class="card">
+            <h2>当前状态</h2>
+            <p class="state-unknown">可以在 Safari 扩展设置中启用 `safarai` 扩展。</p>
+            <p class="state-on">扩展已经启用，可以在 Safari 中打开扩展面板验证链路。</p>
+            <p class="state-off">扩展尚未启用，请先在 Safari 设置中手动打开。</p>
+            <button class="open-preferences">退出并打开 Safari 扩展设置</button>
+        </section>
+
+        <section class="card checklist">
+            <h2>使用方式</h2>
+            <ul>
+                <li>账号登录、退出、当前账号与模型选择均集中在 Safari 浏览器按钮面板里</li>
+                <li>宿主 App 只负责承载 Safari Web Extension 与原生 OAuth / 请求能力</li>
+                <li>扩展侧负责页面理解、问答、结构化提取与安全写入</li>
+                <li>当前实现为单账户、单默认模型，全局共享</li>
+            </ul>
+        </section>
+    </main>
+</body>
+</html>

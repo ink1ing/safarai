@@ -1,0 +1,65 @@
+//
+//  AppDelegate.swift
+//  safarai
+//
+//  Created by silas on 3/13/26.
+//
+
+import Cocoa
+
+@main
+class AppDelegate: NSObject, NSApplicationDelegate {
+    private var loginRequestTimer: Timer?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+        startLoginRequestPolling()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    @objc private func handlePendingLoginRequest() {
+        guard CodexLoginRequestStore.loadPendingRequest() else {
+            return
+        }
+        CodexLoginRequestStore.clear()
+        Task {
+            _ = try? await CodexOAuthService.shared.startLogin()
+        }
+    }
+
+    private func startLoginRequestPolling() {
+        loginRequestTimer?.invalidate()
+        loginRequestTimer = Timer.scheduledTimer(
+            timeInterval: 1.0,
+            target: self,
+            selector: #selector(handlePendingLoginRequest),
+            userInfo: nil,
+            repeats: true
+        )
+        handlePendingLoginRequest()
+    }
+
+    @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
+        guard
+            let rawURL = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+            let url = URL(string: rawURL)
+        else {
+            return
+        }
+
+        if url.scheme == "safarai", url.host == "start-codex-login" {
+            Task {
+                _ = try? await CodexOAuthService.shared.startLogin()
+            }
+        }
+    }
+
+}

@@ -1,0 +1,242 @@
+:root {
+  color-scheme: light dark;
+  --background: #f5f0eb;
+  --surface: #fffffdfa;
+  --surface-variant: #ede5dd;
+  --text-primary: #1a1a18;
+  --text-primary-alt: #1c1c1a;
+  --text-secondary: #6b6b6b;
+  --outline: #1a1a18;
+  --primary: #8b5e3c;
+  --primary-strong: #6f492e;
+  --error: #b3261e;
+  --tag-cet4: #4fc3f7;
+  --tag-cet6: #81c784;
+  --tag-ielts: #ffb74d;
+  --tag-toefl: #e57373;
+  --shadow: 0 18px 40px rgba(26, 26, 24, 0.09);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #1c1b19;
+    --surface: #242320;
+    --surface-variant: #2e2d2a;
+    --text-primary: #ececec;
+    --text-primary-alt: #e8e8e6;
+    --text-secondary: #9b9b9b;
+    --outline: #d4d4d4;
+    --primary: #c8a97e;
+    --primary-strong: #d9bb92;
+    --error: #b3261e;
+    --shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 380px;
+  background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--primary) 16%, transparent), transparent 42%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 36%, var(--background)) 0%, var(--background) 100%);
+  color: var(--text-primary);
+  font: 14px/1.6 "Inter", "SF Pro Text", "PingFang SC", sans-serif;
+}
+
+.app-shell {
+  padding: 18px;
+}
+
+.hero {
+  margin-bottom: 14px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hero h1,
+.panel h2 {
+  margin: 0;
+  font: 700 22px/1.15 "Plus Jakarta Sans", "Avenir Next", "SF Pro Display", sans-serif;
+}
+
+.subtitle {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+}
+
+.panel {
+  margin-bottom: 12px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--outline) 12%, transparent);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.status-row,
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.status-row + .status-row {
+  margin-top: 8px;
+}
+
+.context-grid {
+  margin: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.context-grid div {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.context-grid div:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+dt {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+dd {
+  margin: 4px 0 0;
+  word-break: break-word;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+button {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: var(--primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  transform: none;
+}
+
+button:hover {
+  background: var(--primary-strong);
+  transform: translateY(-1px);
+}
+
+.section-head button {
+  padding: 8px 12px;
+}
+
+.status-row button {
+  padding: 8px 12px;
+}
+
+.answer-panel pre {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  font: 13px/1.55 "SF Mono", Menlo, monospace;
+}
+
+.draft-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.draft-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+
+#draft-target {
+  color: var(--text-primary);
+  text-align: right;
+}
+
+#draft-editor {
+  width: 100%;
+  min-height: 164px;
+  resize: vertical;
+  border: 1px solid color-mix(in srgb, var(--outline) 14%, transparent);
+  border-radius: 14px;
+  padding: 12px;
+  background: var(--surface-variant);
+  color: var(--text-primary-alt);
+  font: 13px/1.6 "Inter", "SF Mono", Menlo, monospace;
+}
+
+#draft-editor:focus {
+  outline: 2px solid color-mix(in srgb, var(--primary) 28%, transparent);
+  border-color: var(--primary);
+}
+
+#question-editor {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  border: 1px solid color-mix(in srgb, var(--outline) 14%, transparent);
+  border-radius: 14px;
+  padding: 12px;
+  background: var(--surface-variant);
+  color: var(--text-primary-alt);
+  font: 13px/1.6 "Inter", "SF Mono", Menlo, monospace;
+}
+
+.conversation-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.conversation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.conversation-item {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-variant) 70%, var(--surface));
+}
+
+.conversation-item[data-role="assistant"] {
+  background: color-mix(in srgb, var(--primary) 14%, var(--surface));
+}
+
+.conversation-role {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+}
