@@ -10,6 +10,7 @@ import Cocoa
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var loginRequestTimer: Timer?
+    private lazy var floatingPanelController = FloatingPanelController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(
@@ -58,6 +59,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if url.scheme == "safarai", url.host == "start-codex-login" {
             Task {
                 _ = try? await CodexOAuthService.shared.startLogin()
+            }
+        } else if url.scheme == "safarai", url.host == "show-panel" {
+            DispatchQueue.main.async {
+                self.floatingPanelController.showPanel()
             }
         }
     }

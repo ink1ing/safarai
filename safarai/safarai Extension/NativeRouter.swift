@@ -12,6 +12,7 @@ enum NativeRouter {
 
         let requestId = payload["id"] as? String ?? "req_missing"
         let context = ((payload["payload"] as? [String: Any])?["context"] as? [String: Any]) ?? [:]
+        let rawPayload = (payload["payload"] as? [String: Any]) ?? [:]
         let config = ProviderConfig.load()
 
         switch type {
@@ -79,6 +80,33 @@ enum NativeRouter {
             } catch {
                 return MockNativeRouter.error(code: "save_model_failed", message: error.localizedDescription)
             }
+        case "show_panel":
+            do {
+                try PanelStateWriter.save(payload: rawPayload, status: "ready")
+                try openHostURL("safarai://show-panel")
+                return [
+                    "ok": true,
+                    "payload": [
+                        "request_id": requestId,
+                        "answer": "已请求宿主 App 显示独立面板。",
+                    ],
+                ]
+            } catch {
+                return MockNativeRouter.error(code: "show_panel_failed", message: error.localizedDescription)
+            }
+        case "sync_panel_state":
+            do {
+                try PanelStateWriter.save(payload: rawPayload, status: "ready")
+                return [
+                    "ok": true,
+                    "payload": [
+                        "request_id": requestId,
+                        "synced": true,
+                    ],
+                ]
+            } catch {
+                return MockNativeRouter.error(code: "sync_panel_state_failed", message: error.localizedDescription)
+            }
         default:
             let client = LocalProviderClient(config: config)
             do {
@@ -114,18 +142,22 @@ enum NativeRouter {
     }
 
     private static func openCodexLoginURL() throws {
-        guard let url = URL(string: "safarai://start-codex-login") else {
+        try openHostURL("safarai://start-codex-login")
+    }
+
+    private static func openHostURL(_ rawURL: String) throws {
+        guard let url = URL(string: rawURL) else {
             throw NSError(
                 domain: "ink.safarai.oauth",
                 code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "无法构造登录 URL"]
+                userInfo: [NSLocalizedDescriptionKey: "无法构造宿主 URL"]
             )
         }
         if NSWorkspace.shared.open(url) == false {
             throw NSError(
                 domain: "ink.safarai.oauth",
                 code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "无法唤起宿主 App 处理登录"]
+                userInfo: [NSLocalizedDescriptionKey: "无法唤起宿主 App"]
             )
         }
     }

@@ -11,6 +11,9 @@ import {
 } from "./write-target.js";
 
 let activeWriteTarget = null;
+let lastKnownURL = window.location.href;
+
+queueContextSync();
 
 browser.runtime.onMessage.addListener((message) => {
   switch (message?.type) {
@@ -24,6 +27,35 @@ browser.runtime.onMessage.addListener((message) => {
       return undefined;
   }
 });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    queueContextSync();
+  }
+});
+
+window.addEventListener("focus", () => {
+  queueContextSync();
+});
+
+window.addEventListener("popstate", () => {
+  queueContextSync();
+});
+
+window.addEventListener("hashchange", () => {
+  queueContextSync();
+});
+
+document.addEventListener("yt-navigate-finish", () => {
+  queueContextSync();
+});
+
+setInterval(() => {
+  if (window.location.href !== lastKnownURL) {
+    lastKnownURL = window.location.href;
+    queueContextSync();
+  }
+}, 1000);
 
 function handleGetPageContext() {
   try {
@@ -121,4 +153,19 @@ function handleApplyDraft(draft) {
       target: describeWriteTarget(target, extractPageContext(window, document).metadata),
     })
   );
+}
+
+function queueContextSync() {
+  setTimeout(() => {
+    try {
+      lastKnownURL = window.location.href;
+      const context = extractPageContext(window, document);
+      browser.runtime.sendMessage({
+        type: "content:page-updated",
+        payload: { context },
+      }).catch(() => {});
+    } catch {
+      // Ignore transient DOM read failures during page bootstrap.
+    }
+  }, 0);
 }

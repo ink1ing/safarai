@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="../Panel.css">
+    <script src="../Panel.js" defer></script>
+</head>
+<body>
+    <main class="app-shell">
+        <section class="conversation-panel">
+            <div id="conversation-list" class="conversation-list"></div>
+        </section>
+
+        <footer class="composer">
+            <div id="context-url" class="context-url"></div>
+            <textarea id="question-editor" spellcheck="false"></textarea>
+            <div class="composer-footer">
+                <div class="composer-left">
+                    <button id="settings-button" class="icon-button" type="button" aria-label="设置">◎</button>
+                    <span id="conversation-status">等待页面同步</span>
+                </div>
+                <div class="composer-right">
+                    <select id="model-select" class="chip chip-select" aria-label="选择模型"></select>
+                    <button id="refresh-context-button" class="icon-button" type="button" aria-label="刷新">↻</button>
+                    <button id="ask-page" class="icon-button icon-button-primary" type="button" aria-label="发送">↑</button>
+                </div>
+            </div>
+        </footer>
+    </main>
+</body>
+</html>

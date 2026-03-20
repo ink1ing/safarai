@@ -91,6 +91,7 @@ final class CodexOAuthService {
         let callbackTask = prepareCallbackWait(using: listener.listener, expectedState: state)
         updateLoginState(inProgress: true, stage: "listener_starting")
         listener.listener.start(queue: .global(qos: .userInitiated))
+        try await waitForListenerReady(listener.listener)
 
         updateLoginState(inProgress: true, stage: "browser_open_requested")
         let browserOpened = await MainActor.run {
@@ -294,6 +295,29 @@ final class CodexOAuthService {
         }
 
         throw CodexOAuthError.callbackServerUnavailable
+    }
+
+    private func waitForListenerReady(_ listener: NWListener) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let resolutionState = CallbackResolutionState()
+
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    resolutionState.finish {
+                        listener.stateUpdateHandler = nil
+                        continuation.resume(returning: ())
+                    }
+                case .failed(let error):
+                    resolutionState.finish {
+                        listener.stateUpdateHandler = nil
+                        continuation.resume(throwing: error)
+                    }
+                default:
+                    break
+                }
+            }
+        }
     }
 
     private func prepareCallbackWait(using listener: NWListener, expectedState: String) -> Task<OAuthCallback, Error> {

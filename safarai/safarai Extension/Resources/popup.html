@@ -9,57 +9,22 @@
 <body>
     <main class="app-shell">
         <header class="topbar">
-            <div class="brand">
-                <p class="eyebrow">Safari AI Sidebar</p>
-                <h1>当前页面对话</h1>
-            </div>
-            <div class="topbar-actions">
-                <button id="account-pill" class="chip chip-ghost" type="button" disabled>未登录</button>
-                <select id="model-select" class="chip chip-select" aria-label="选择模型"></select>
-                <button id="auth-toggle" class="chip chip-solid" type="button">登录</button>
-            </div>
+            <button id="account-pill" class="chip chip-ghost" type="button" disabled>未登录</button>
+            <select id="model-select" class="chip chip-select" aria-label="选择模型"></select>
+            <button id="auth-toggle" class="chip chip-solid" type="button">登录</button>
         </header>
 
-        <section class="status-strip panel">
-            <div class="status-item">
-                <span>站点</span>
-                <strong id="site-name">-</strong>
-            </div>
-            <div class="status-item">
-                <span>页面</span>
-                <strong id="page-title">加载中</strong>
-            </div>
-            <div class="status-item status-item-wide">
-                <span>选区</span>
-                <strong id="page-selection">无选中文本</strong>
-            </div>
-            <div class="status-item">
-                <span>连接</span>
-                <strong id="host-status">待检测</strong>
-            </div>
-        </section>
-
-        <section class="quick-actions">
-            <button id="summarize-page" type="button">总结页面</button>
-            <button id="explain-selection" type="button">解释选区</button>
-            <button id="extract-structured-info" type="button">提取结构化信息</button>
-        </section>
-
         <section class="conversation-panel panel">
-            <div class="section-head">
-                <div>
-                    <h2>对话记录</h2>
-                    <p id="conversation-hint">整页内容默认进入上下文；若有选中文本，会自动作为重点引用。</p>
-                </div>
-                <strong id="conversation-status">空</strong>
-            </div>
             <div id="conversation-list" class="conversation-list"></div>
         </section>
 
         <footer class="composer panel">
             <textarea id="question-editor" placeholder="输入问题，回车发送，Shift+回车换行" spellcheck="false"></textarea>
             <div class="composer-footer">
-                <span id="citation-hint">当前页面内容会自动纳入回答</span>
+                <div class="composer-meta">
+                    <button id="selection-toggle" class="selection-toggle" type="button" hidden>引用选中文本</button>
+                    <span id="conversation-status">空</span>
+                </div>
                 <button id="ask-page" type="button">发送</button>
             </div>
         </footer>

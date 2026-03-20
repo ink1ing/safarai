@@ -13,6 +13,56 @@ browser.runtime.onInstalled.addListener(() => {
   console.log("Safari AI background ready");
 });
 
+if (browser.tabs?.onUpdated) {
+  browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (!tabId || (!changeInfo.url && changeInfo.status !== "complete")) {
+      return;
+    }
+
+    const contextResult = await requestPageContext(tabId);
+    const context = contextResult.ok
+      ? contextResult.payload?.context ?? {}
+      : buildFallbackContext(tab);
+
+    TAB_STATE.set(tabId, context);
+    await syncPanelState(tabId, context);
+  });
+}
+
+if (browser.tabs?.onActivated) {
+  browser.tabs.onActivated.addListener(async (activeInfo) => {
+    const tab = await browser.tabs.get(activeInfo.tabId).catch(() => null);
+    if (!tab?.id) {
+      return;
+    }
+
+    const contextResult = await requestPageContext(tab.id);
+    const context = contextResult.ok
+      ? contextResult.payload?.context ?? {}
+      : buildFallbackContext(tab);
+
+    TAB_STATE.set(tab.id, context);
+    await syncPanelState(tab.id, context);
+  });
+}
+
+if (browser.action?.onClicked) {
+  browser.action.onClicked.addListener(async (tab) => {
+    const tabId = tab?.id ?? null;
+    const contextResult = await ensurePageContext(tabId);
+    const context = contextResult.ok ? contextResult.payload?.context ?? {} : {};
+    const messages = tabId ? await loadSession(tabId) : [];
+    await sendNativeControlRequest("sync_panel_state", {
+      context,
+      messages,
+    });
+    await sendNativeControlRequest("show_panel", {
+      context,
+      messages,
+    });
+  });
+}
+
 browser.runtime.onMessage.addListener((message, sender) => {
   if (!message || typeof message.type !== "string") {
     return Promise.resolve(
@@ -49,6 +99,8 @@ browser.runtime.onMessage.addListener((message, sender) => {
       return askPage(sender.tab?.id, message.payload?.prompt, message.payload?.selection);
     case "sidebar:get-logs":
       return getLogs();
+    case "content:page-updated":
+      return syncPanelStateFromContent(sender.tab?.id, message.payload?.context);
     default:
       return Promise.resolve(
         createErrorResponse("unsupported_message", `不支持的消息类型: ${message.type}`)
@@ -68,6 +120,7 @@ async function loadPageContextForActiveTab() {
   }
 
   TAB_STATE.set(tab.id, pageContext.payload.context);
+  await syncPanelState(tab.id, pageContext.payload.context);
   await appendLog({
     level: "info",
     action: "load_page_context",
@@ -75,6 +128,21 @@ async function loadPageContextForActiveTab() {
     pageKind: pageContext.payload.context.metadata?.pageKind ?? null,
   });
   return pageContext;
+}
+
+async function syncPanelStateFromContent(tabId, context) {
+  if (!context) {
+    return createSuccessResponse({ synced: false });
+  }
+
+  const resolvedTabId = await resolveTabId(tabId);
+  if (!resolvedTabId) {
+    return createSuccessResponse({ synced: false });
+  }
+
+  TAB_STATE.set(resolvedTabId, context);
+  await syncPanelState(resolvedTabId, context);
+  return createSuccessResponse({ synced: true });
 }
 
 async function getProviderStatus() {
@@ -274,6 +342,14 @@ async function ensurePageContext(tabIdFromSender) {
     });
 }
 
+async function syncPanelState(tabId, context) {
+  const messages = tabId ? await loadSession(tabId) : [];
+  await sendNativeControlRequest("sync_panel_state", {
+    context,
+    messages,
+  });
+}
+
 async function askPage(tabIdFromSender, prompt, selectionFromPopup) {
   const userPrompt = String(prompt ?? "").trim();
   if (!userPrompt) {
@@ -351,22 +427,26 @@ async function requestFocusedInputPreparation(tabId) {
 }
 
 async function requestPageContext(tabId) {
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+
   try {
     const response = await browser.tabs.sendMessage(tabId, {
       type: "content:get-page-context",
     });
 
     if (!response?.ok) {
-      return fail(
-        response?.error?.code ?? "content_script_failed",
-        response?.error?.message ?? "页面上下文提取失败",
-        { action: "request_page_context" }
-      );
+      return createSuccessResponse({
+        context: buildFallbackContext(tab),
+        degraded: true,
+      });
     }
 
     const context = response.payload?.context;
     if (!context) {
-      return fail("missing_context", "页面上下文为空", { action: "request_page_context" });
+      return createSuccessResponse({
+        context: buildFallbackContext(tab),
+        degraded: true,
+      });
     }
 
     const normalizedSite = isSupportedSite(context.site) ? context.site : "unsupported";
@@ -377,12 +457,49 @@ async function requestPageContext(tabId) {
       },
     });
   } catch (error) {
-    return fail(
-      "content_script_unreachable",
-      `无法连接页面脚本：${error.message}`,
-      { action: "request_page_context" }
-    );
+    return createSuccessResponse({
+      context: buildFallbackContext(tab),
+      degraded: true,
+    });
   }
+}
+
+function buildFallbackContext(tab) {
+  const url = String(tab?.url ?? "");
+  const title = String(tab?.title ?? "当前页面");
+
+  let domain = "";
+  let site = "unsupported";
+  try {
+    const parsed = new URL(url);
+    domain = parsed.hostname;
+    site = detectSiteFromHostname(domain);
+  } catch {
+    domain = "";
+  }
+
+  return {
+    site,
+    url,
+    title,
+    selection: "",
+    articleText: title && url ? `title: ${title}\nurl: ${url}` : title || url,
+    focusedInput: null,
+    metadata: {
+      domain,
+      pageKind: "fallback_tab_context",
+    },
+  };
+}
+
+function detectSiteFromHostname(hostname) {
+  if (hostname.includes("github.com")) return "github";
+  if (hostname.includes("mail.google.com")) return "gmail";
+  if (hostname === "x.com" || hostname.endsWith(".x.com") || hostname.includes("twitter.com")) {
+    return "x";
+  }
+  if (hostname.includes("mail.yahoo.com")) return "yahoo_mail";
+  return "unsupported";
 }
 
 async function sendNativeRequest(type, context) {

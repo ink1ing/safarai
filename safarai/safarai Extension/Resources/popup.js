@@ -1,33 +1,25 @@
 import { createRequest } from "./protocol.js";
 
-const hostStatus = document.getElementById("host-status");
-const siteName = document.getElementById("site-name");
-const pageTitle = document.getElementById("page-title");
-const pageSelection = document.getElementById("page-selection");
-const citationHint = document.getElementById("citation-hint");
 const conversationList = document.getElementById("conversation-list");
 const conversationStatus = document.getElementById("conversation-status");
 const questionEditor = document.getElementById("question-editor");
-const summarizePageButton = document.getElementById("summarize-page");
-const explainSelectionButton = document.getElementById("explain-selection");
-const extractStructuredInfoButton = document.getElementById("extract-structured-info");
 const askPageButton = document.getElementById("ask-page");
 const accountPill = document.getElementById("account-pill");
 const modelSelect = document.getElementById("model-select");
 const authToggle = document.getElementById("auth-toggle");
+const selectionToggle = document.getElementById("selection-toggle");
 
 let sessionMessages = [];
-let currentSelection = "";
 let isLoggedIn = false;
 let loginPollTimer = null;
 let didAutoRefreshModels = false;
+let currentSelection = "";
+let pageContextReady = false;
 
-summarizePageButton.addEventListener("click", () => runAction("sidebar:summarize-page"));
-explainSelectionButton.addEventListener("click", () => runAction("sidebar:explain-selection"));
-extractStructuredInfoButton.addEventListener("click", () => runAction("sidebar:extract-structured-info"));
 askPageButton.addEventListener("click", sendQuestion);
 authToggle.addEventListener("click", handleAuthToggle);
 modelSelect.addEventListener("change", saveSelectedModel);
+selectionToggle.addEventListener("click", toggleSelectionReference);
 questionEditor.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -45,19 +37,17 @@ async function loadContext() {
   });
 
   if (!response?.ok) {
-    siteName.textContent = "-";
-    pageTitle.textContent = "页面读取失败";
-    pageSelection.textContent = "无选中文本";
-    citationHint.textContent = "无法读取当前页面内容";
-    return;
+    pageContextReady = false;
+    currentSelection = "";
+    syncSelectionToggle();
+    conversationStatus.textContent = "页面上下文提取失败";
+    return null;
   }
 
-  const context = response.payload?.context ?? {};
-  siteName.textContent = context.site || "-";
-  pageTitle.textContent = context.title || "-";
-  currentSelection = context.selection || "";
-  pageSelection.textContent = currentSelection || "无选中文本";
-  updateCitationHint();
+  pageContextReady = true;
+  currentSelection = String(response.payload?.context?.selection ?? "").trim();
+  syncSelectionToggle();
+  return response.payload?.context ?? null;
 }
 
 async function loadProviderStatus() {
@@ -65,7 +55,6 @@ async function loadProviderStatus() {
 
   if (!response?.ok) {
     isLoggedIn = false;
-    hostStatus.textContent = "离线";
     accountPill.textContent = "未登录";
     authToggle.textContent = "登录";
     authToggle.disabled = false;
@@ -81,7 +70,6 @@ async function loadProviderStatus() {
   const availableModels = response.payload?.availableModels ?? [];
   const selectedModel = response.payload?.selectedModel || "gpt-5";
 
-  hostStatus.textContent = loginInProgress ? "登录中" : isLoggedIn ? "已连接" : "未登录";
   accountPill.textContent = loginInProgress ? "登录中…" : email || (isLoggedIn ? "已登录" : "未登录");
   authToggle.textContent = isLoggedIn ? "退出" : loginInProgress ? "登录中" : "登录";
   authToggle.disabled = loginInProgress;
@@ -95,7 +83,7 @@ async function loadProviderStatus() {
     stopLoginPoll();
   }
 
-  if (isLoggedIn && !didAutoRefreshModels && (!availableModels.length || availableModels.length === 1 && availableModels[0].id === "gpt-5")) {
+  if (isLoggedIn && !didAutoRefreshModels && (!availableModels.length || (availableModels.length === 1 && availableModels[0].id === "gpt-5"))) {
     didAutoRefreshModels = true;
     refreshCodexModels();
   }
@@ -111,14 +99,13 @@ async function handleAuthToggle() {
 }
 
 async function startCodexLogin() {
-  hostStatus.textContent = "登录中";
-  conversationStatus.textContent = "正在拉起登录";
+  conversationStatus.textContent = "正在登录";
   const response = await sendNativeControlRequest("start_login");
   if (!response?.ok) {
-    hostStatus.textContent = "失败";
-    conversationStatus.textContent = "登录失败";
+    conversationStatus.textContent = response?.error?.message ?? "登录失败";
     return;
   }
+
   conversationStatus.textContent = response.payload?.loginDispatch || "请求已发送";
   scheduleLoginPoll();
 }
@@ -126,7 +113,6 @@ async function startCodexLogin() {
 async function logoutCodex() {
   const response = await sendNativeControlRequest("logout");
   if (!response?.ok) {
-    hostStatus.textContent = "失败";
     conversationStatus.textContent = response?.error?.message ?? "登出失败";
     return;
   }
@@ -162,23 +148,6 @@ async function saveSelectedModel() {
   await loadProviderStatus();
 }
 
-async function runAction(type) {
-  if (!isLoggedIn) {
-    conversationStatus.textContent = "请先登录 Codex";
-    return;
-  }
-
-  conversationStatus.textContent = "生成中";
-  const response = await browser.runtime.sendMessage({ type });
-  if (!response?.ok) {
-    conversationStatus.textContent = response?.error?.message ?? "请求失败";
-    return;
-  }
-
-  await loadSession();
-  conversationStatus.textContent = "已更新";
-}
-
 async function sendQuestion() {
   if (!isLoggedIn) {
     conversationStatus.textContent = "请先登录 Codex";
@@ -191,11 +160,20 @@ async function sendQuestion() {
     return;
   }
 
+  const context = await loadContext();
+  if (!context || !pageContextReady) {
+    conversationStatus.textContent = "页面上下文提取失败";
+    return;
+  }
+
   questionEditor.value = "";
   conversationStatus.textContent = "正在回答";
   const response = await browser.runtime.sendMessage({
     type: "sidebar:ask-page",
-    payload: { prompt, selection: currentSelection },
+    payload: {
+      prompt,
+      selection: selectionToggle.dataset.active === "true" ? currentSelection : "",
+    },
   });
 
   if (!response?.ok) {
@@ -239,8 +217,8 @@ function renderConversation(messages) {
     empty.className = "conversation-item conversation-item--system";
     empty.dataset.role = "system";
     empty.innerHTML = `
-      <span class="conversation-role">system / hint</span>
-      <div>把问题输入底部，回车发送。系统会默认结合当前页面上下文；如果有选中文本，会把它作为重点引用。</div>
+      <span class="conversation-role">system</span>
+      <div>暂无对话</div>
     `;
     conversationList.appendChild(empty);
     return;
@@ -252,30 +230,17 @@ function renderConversation(messages) {
     entry.className = `conversation-item conversation-item--${role}`;
     entry.dataset.role = role;
     entry.innerHTML = `
-      <span class="conversation-role">${escapeHtml(role)} / ${escapeHtml(item.kind || "message")}</span>
+      <span class="conversation-role">${escapeHtml(role)}</span>
       <div>${escapeHtml(item.text || "")}</div>
     `;
     conversationList.appendChild(entry);
   }
 }
 
-function updateCitationHint() {
-  if (currentSelection) {
-    citationHint.textContent = `当前选区将自动纳入回答：${truncate(currentSelection, 48)}`;
-    questionEditor.placeholder = "输入问题，回车发送，系统会结合选区与整页内容回答";
-    return;
-  }
-
-  citationHint.textContent = "当前页面内容会自动纳入回答";
-  questionEditor.placeholder = "输入问题，回车发送，Shift+回车换行";
-}
-
 function disableInferenceActions(disabled) {
-  summarizePageButton.disabled = disabled;
-  explainSelectionButton.disabled = disabled;
-  extractStructuredInfoButton.disabled = disabled;
   askPageButton.disabled = disabled;
   questionEditor.disabled = disabled;
+  selectionToggle.disabled = disabled;
 }
 
 function bindModelSelect(models, selected) {
@@ -322,6 +287,27 @@ function stopLoginPoll() {
   }
 }
 
+function toggleSelectionReference() {
+  if (selectionToggle.hidden) {
+    return;
+  }
+
+  const nextActive = selectionToggle.dataset.active !== "true";
+  selectionToggle.dataset.active = nextActive ? "true" : "false";
+}
+
+function syncSelectionToggle() {
+  if (!currentSelection) {
+    selectionToggle.hidden = true;
+    selectionToggle.dataset.active = "false";
+    return;
+  }
+
+  selectionToggle.hidden = false;
+  selectionToggle.dataset.active = "true";
+  selectionToggle.textContent = `引用选中内容 (${truncate(currentSelection, 18)})`;
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -334,5 +320,5 @@ function truncate(value, limit) {
   if (text.length <= limit) {
     return text;
   }
-  return `${text.slice(0, limit - 1)}…`;
+  return `${text.slice(0, limit - 1)}...`;
 }
