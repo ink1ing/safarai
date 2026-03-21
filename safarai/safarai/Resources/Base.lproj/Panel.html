@@ -1,32 +1,333 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="../Panel.css">
-    <script src="../Panel.js" defer></script>
-</head>
-<body>
-    <main class="app-shell">
-        <section class="conversation-panel">
-            <div id="conversation-list" class="conversation-list"></div>
-        </section>
+<!doctype html>
+<html class="dark" lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Digital Ether - AI Sidebar</title>
+        <link rel="stylesheet" href="../Panel.css" />
+        <script src="../Panel.js" defer></script>
+    </head>
+    <body>
+        <div class="noise-overlay"></div>
+        <div class="app-frame">
+            <aside class="nav-drawer">
+                <div class="drawer-brand">Digital Ether</div>
+                <nav class="drawer-nav">
+                    <button
+                        class="drawer-button drawer-button-primary"
+                        type="button"
+                    >
+                        <span class="drawer-icon">+</span>
+                        <span>New Chat</span>
+                    </button>
+                    <button class="drawer-button" type="button">
+                        <span class="drawer-icon">H</span>
+                        <span>History</span>
+                    </button>
+                    <button class="drawer-button" type="button">
+                        <span class="drawer-icon">T</span>
+                        <span>Templates</span>
+                    </button>
+                </nav>
+                <div class="drawer-usage">
+                    <div class="drawer-usage-label">Usage</div>
+                    <div class="drawer-usage-bar">
+                        <div class="drawer-usage-bar-fill"></div>
+                    </div>
+                    <div class="drawer-usage-meta">6.5k / 10k tokens</div>
+                </div>
+            </aside>
 
-        <footer class="composer">
-            <div id="context-url" class="context-url"></div>
-            <textarea id="question-editor" spellcheck="false"></textarea>
-            <div class="composer-footer">
-                <div class="composer-left">
-                    <button id="settings-button" class="icon-button" type="button" aria-label="设置">◎</button>
-                    <span id="conversation-status">等待页面同步</span>
+            <main class="main-pane">
+                <section class="chat-scroll">
+                    <div id="conversation-list" class="conversation-list"></div>
+                </section>
+
+                <!-- Inline settings drawer -->
+                <div
+                    id="settings-drawer"
+                    class="settings-drawer"
+                    aria-hidden="true"
+                >
+                    <div class="settings-drawer-inner">
+                        <div class="settings-header">
+                            <div class="settings-header-title">设置</div>
+                            <button
+                                id="settings-close-button"
+                                class="settings-close-button"
+                                type="button"
+                                aria-label="收起设置"
+                            >
+                                <svg
+                                    width="12"
+                                    height="12"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2.2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                >
+                                    <path d="M18 6 6 18" />
+                                    <path d="m6 6 12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-label">AI 提供商</div>
+                            <div class="settings-button-row">
+                                <button
+                                    class="settings-btn"
+                                    id="sd-provider-codex"
+                                    type="button"
+                                    onclick="sdSwitchProvider('codex')"
+                                >
+                                    Codex
+                                </button>
+                                <button
+                                    class="settings-btn"
+                                    id="sd-provider-zed"
+                                    type="button"
+                                    onclick="sdSwitchProvider('zed')"
+                                >
+                                    Zed
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-label">Codex 账户</div>
+                            <div class="settings-value" id="sd-codex-email">
+                                未登录
+                            </div>
+                            <div
+                                class="settings-button-row"
+                                style="margin-top: 8px"
+                            >
+                                <button
+                                    class="settings-btn settings-btn-primary"
+                                    id="sd-login-codex"
+                                    type="button"
+                                >
+                                    登录
+                                </button>
+                                <button
+                                    class="settings-btn settings-btn-danger"
+                                    id="sd-logout-codex"
+                                    type="button"
+                                >
+                                    退出
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-label">Zed 账户</div>
+                            <div class="settings-value" id="sd-zed-name">
+                                未登录
+                            </div>
+                            <div
+                                class="settings-button-row"
+                                style="margin-top: 8px"
+                            >
+                                <button
+                                    class="settings-btn settings-btn-primary"
+                                    id="sd-import-zed"
+                                    type="button"
+                                >
+                                    导入 Zed
+                                </button>
+                                <button
+                                    class="settings-btn settings-btn-danger"
+                                    id="sd-logout-zed"
+                                    type="button"
+                                >
+                                    退出
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-label">窗口位置</div>
+                            <div class="settings-button-row">
+                                <button
+                                    class="settings-btn"
+                                    id="sd-placement-remember"
+                                    type="button"
+                                >
+                                    记忆位置
+                                </button>
+                                <button
+                                    class="settings-btn"
+                                    id="sd-placement-left"
+                                    type="button"
+                                >
+                                    左吸附
+                                </button>
+                                <button
+                                    class="settings-btn"
+                                    id="sd-placement-right"
+                                    type="button"
+                                >
+                                    右吸附
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-status" id="sd-status"></div>
+                    </div>
                 </div>
-                <div class="composer-right">
-                    <select id="model-select" class="chip chip-select" aria-label="选择模型"></select>
-                    <button id="refresh-context-button" class="icon-button" type="button" aria-label="刷新">↻</button>
-                    <button id="ask-page" class="icon-button icon-button-primary" type="button" aria-label="发送">↑</button>
+
+                <footer class="composer-shell glass-panel">
+                    <div class="suggestion-row">
+                        <button
+                            class="suggestion-pill"
+                            type="button"
+                            data-prompt="解释当前页面"
+                        >
+                            解释页面
+                        </button>
+                        <button
+                            class="suggestion-pill"
+                            type="button"
+                            data-prompt="翻译当前页面为中文"
+                        >
+                            翻译页面
+                        </button>
+                        <button
+                            class="suggestion-pill"
+                            type="button"
+                            data-prompt="针对当前页面给出建议"
+                        >
+                            给出建议
+                        </button>
+                    </div>
+
+                    <div class="composer-card">
+                        <div id="context-url" class="context-url"></div>
+                        <textarea
+                            id="question-editor"
+                            rows="1"
+                            spellcheck="false"
+                        ></textarea>
+                        <div class="composer-footer">
+                            <div class="composer-left">
+                                <div class="status-chip">
+                                    <span id="conversation-status"></span>
+                                </div>
+                            </div>
+                            <div class="composer-right">
+                                <div class="model-chip">
+                                    <span
+                                        id="model-display"
+                                        class="model-display"
+                                        aria-hidden="true"
+                                    ></span>
+                                    <select
+                                        id="model-select"
+                                        aria-label="选择模型"
+                                    ></select>
+                                </div>
+                                <button
+                                    id="refresh-context-button"
+                                    class="icon-button icon-button-muted"
+                                    type="button"
+                                    aria-label="刷新"
+                                >
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2.2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                    >
+                                        <path d="M21.5 2v6h-6" />
+                                        <path d="M2.5 22v-6h6" />
+                                        <path
+                                            d="M3.5 12a9 9 0 0 1 14.8-5.2L21.5 8"
+                                        />
+                                        <path
+                                            d="M20.5 12a9 9 0 0 1-14.8 5.2L2.5 16"
+                                        />
+                                    </svg>
+                                </button>
+                                <button
+                                    id="settings-button"
+                                    class="icon-button icon-button-muted"
+                                    type="button"
+                                    aria-label="设置"
+                                >
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2.2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                    >
+                                        <circle cx="12" cy="12" r="3" />
+                                        <path
+                                            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+                                        />
+                                    </svg>
+                                </button>
+                                <button
+                                    id="ask-page"
+                                    class="icon-button icon-button-primary"
+                                    type="button"
+                                    aria-label="发送"
+                                >
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2.5"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                    >
+                                        <line x1="12" y1="19" x2="12" y2="5" />
+                                        <polyline points="5 12 12 5 19 12" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="footer-meta">
+                        AI MAY DISPLAY INACCURATE INFO
+                    </div>
+                </footer>
+            </main>
+
+            <aside class="context-pane">
+                <div class="context-title">Referenced Source</div>
+                <div class="context-card">
+                    <div class="context-image"></div>
+                    <div class="context-card-title">Current Page Snapshot</div>
+                    <div
+                        class="context-card-url"
+                        id="context-preview-url"
+                    ></div>
                 </div>
-            </div>
-        </footer>
-    </main>
-</body>
+
+                <div class="context-title">Key Entities</div>
+                <div class="entity-list">
+                    <span class="entity-pill">Page Context</span>
+                    <span class="entity-pill">Selection</span>
+                    <span class="entity-pill">Conversation</span>
+                </div>
+
+                <div class="context-suggestion">
+                    <div class="context-suggestion-title">Pro Suggestion</div>
+                    <p>
+                        Use the refreshed page context to ask for a summary,
+                        extraction, or next action draft.
+                    </p>
+                </div>
+            </aside>
+        </div>
+    </body>
 </html>

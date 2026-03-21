@@ -14,31 +14,18 @@ let extensionBundleIdentifier = "ink.safarai.Extension"
 class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHandler {
 
     @IBOutlet var webView: WKWebView!
-    private lazy var settingsPanelController = SettingsPanelController()
+
     private var panelRefreshTimer: Timer?
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        self.webView.navigationDelegate = self
-
-        self.webView.configuration.userContentController.add(self, name: "controller")
-        self.settingsPanelController.onLogout = { [weak self] in
-            self?.pushPanelState(status: "已登出 Codex。")
-        }
-        self.settingsPanelController.onLogin = { [weak self] in
-            self?.startCodexLogin()
-        }
-        self.settingsPanelController.onPlacementModeChange = { [weak self] rawValue in
-            do {
-                try self?.savePlacementMode(rawValue)
-                self?.pushPanelState(status: "窗口位置策略已更新。")
-            } catch {
-                self?.pushError(error.localizedDescription)
-            }
-        }
-
-        self.webView.loadFileURL(Bundle.main.url(forResource: "Panel", withExtension: "html")!, allowingReadAccessTo: Bundle.main.resourceURL!)
+        webView.navigationDelegate = self
+        webView.configuration.userContentController.add(self, name: "controller")
+        webView.loadFileURL(
+            Bundle.main.url(forResource: "Panel", withExtension: "html")!,
+            allowingReadAccessTo: Bundle.main.resourceURL!
+        )
         startPanelRefreshTimer()
     }
 
@@ -54,9 +41,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: extensionBundleIdentifier) { (state, error) in
+        SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: extensionBundleIdentifier) { state, error in
             guard let state = state, error == nil else {
-                // Insert code to inform the user that something went wrong.
                 return
             }
 
@@ -69,7 +55,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if let command = message.body as? String {
             if command == "open-preferences" {
-                SFSafariApplication.showPreferencesForExtension(withIdentifier: extensionBundleIdentifier) { error in
+                SFSafariApplication.showPreferencesForExtension(withIdentifier: extensionBundleIdentifier) { _ in
                     DispatchQueue.main.async {
                         NSApplication.shared.terminate(nil)
                     }
@@ -94,6 +80,16 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             logoutCodex()
         case "refresh-codex-models":
             refreshCodexModels()
+        case "login-zed":
+            loginZed()
+        case "logout-zed":
+            logoutZed()
+        case "refresh-zed-models":
+            refreshZedModels()
+        case "switch-provider":
+            if let provider = body["provider"] as? String {
+                switchProvider(provider)
+            }
         case "save-selected-model":
             saveSelectedModel(body)
         case "send-question":
@@ -101,12 +97,20 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         case "refresh-panel-context":
             refreshPanelContext()
         case "open-settings-panel":
-            settingsPanelController.showPanel()
+            break
+        case "save-placement-mode-settings":
+            if let mode = body["placementMode"] as? String {
+                do {
+                    try savePlacementMode(mode)
+                    pushPanelState(status: "窗口位置策略已更新。")
+                } catch {
+                    pushError(error.localizedDescription)
+                }
+            }
         case "reset-provider-settings":
             do {
                 try CodexAccountStore.clear()
                 pushPanelState(status: "已清除当前 Codex 登录状态。")
-                settingsPanelController.pushState(status: "已清除当前 Codex 登录状态。")
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -116,13 +120,12 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func startCodexLogin() {
-        pushPanelState(status: "正在拉起 Codex 登录，请在系统浏览器中完成授权…")
-
+        pushPanelState(status: "正在拉起 Codex 登录…")
         Task {
             do {
                 let result = try await CodexOAuthService.shared.startLogin()
+                try? ProviderSettingsStore.saveActiveProvider(.codex)
                 pushPanelState(status: "Codex 登录成功，模型列表已同步。", configuration: result.configuration)
-                settingsPanelController.pushState(status: "已登录")
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -132,8 +135,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private func logoutCodex() {
         do {
             try CodexAccountStore.clear()
+            if ProviderSettingsStore.loadActiveProvider() == .codex, ZedAccountStore.load() != nil {
+                try? ProviderSettingsStore.saveActiveProvider(.zed)
+            }
             pushPanelState(status: "已登出 Codex。")
-            settingsPanelController.pushState(status: "已登出")
         } catch {
             pushError(error.localizedDescription)
         }
@@ -165,67 +170,203 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func saveSelectedModel(_ body: [String: Any]) {
-        guard var configuration = CodexAccountStore.load() else {
-            pushError("当前未登录 Codex。")
-            return
-        }
-        let selectedModel = (body["selectedModel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let reasoningEffort = (body["reasoningEffort"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "medium"
+        let selectedValue = (body["selectedModel"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let reasoningEffort = (body["reasoningEffort"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "medium"
 
-        guard !selectedModel.isEmpty else {
+        guard !selectedValue.isEmpty else {
             pushError("请选择一个模型。")
             return
         }
 
-        configuration.model.selected = selectedModel
-        do {
-            try CodexAccountStore.save(configuration)
-            try saveUISettings(reasoningEffort: reasoningEffort)
-            pushPanelState(status: "模型已保存。", configuration: configuration)
-            settingsPanelController.pushState()
-        } catch {
-            pushError(error.localizedDescription)
-        }
-    }
+        let selection = parseModelSelection(
+            selectedValue,
+            fallback: resolvedActiveProvider()
+        )
 
-    private func sendQuestion(_ body: [String: Any]) {
-        let prompt = (body["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !prompt.isEmpty else {
-            pushPanelState(status: "请输入问题。")
-            return
-        }
-
-        var snapshot = PanelStateStore.load() ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
-        snapshot.messages.append(PanelConversationMessage(role: "user", kind: "question", text: prompt))
-        snapshot.status = "正在回答"
-        snapshot.updatedAt = Date().timeIntervalSince1970
-        try? PanelStateStore.save(snapshot)
-        pushPanelState(status: "正在回答")
-
-        Task {
+        switch selection.provider {
+        case .zed:
+            guard var configuration = ZedAccountStore.load() else {
+                pushError("当前未登录 Zed。")
+                return
+            }
+            guard configuration.model.available.contains(where: { $0.id == selection.modelID }) else {
+                pushError("所选模型在 Zed 模型列表中不存在。")
+                return
+            }
+            configuration.model.selected = selection.modelID
             do {
-                let answer = try await CodexResponseService.shared.askQuestion(
-                    prompt: prompt,
-                    context: snapshot.context,
-                    history: snapshot.messages
-                )
-                var next = PanelStateStore.load() ?? snapshot
-                next.messages.append(PanelConversationMessage(role: "assistant", kind: "answer", text: answer))
-                next.status = "已回答"
-                next.updatedAt = Date().timeIntervalSince1970
-                try? PanelStateStore.save(next)
-                pushPanelState(status: "已回答")
+                try ZedAccountStore.save(configuration)
+                try ProviderSettingsStore.saveActiveProvider(.zed)
+                try saveUISettings(reasoningEffort: reasoningEffort)
+                pushPanelState(status: "模型已保存。")
+            } catch {
+                pushError(error.localizedDescription)
+            }
+
+        case .codex:
+            guard var configuration = CodexAccountStore.load() else {
+                pushError("当前未登录 Codex。")
+                return
+            }
+            guard configuration.model.available.contains(where: { $0.id == selection.modelID }) else {
+                pushError("所选模型在 Codex 模型列表中不存在。")
+                return
+            }
+            configuration.model.selected = selection.modelID
+            do {
+                try CodexAccountStore.save(configuration)
+                try ProviderSettingsStore.saveActiveProvider(.codex)
+                try saveUISettings(reasoningEffort: reasoningEffort)
+                pushPanelState(status: "模型已保存。", configuration: configuration)
             } catch {
                 pushError(error.localizedDescription)
             }
         }
     }
 
+    private func loginZed() {
+        pushPanelState(status: "正在从 Keychain 导入 Zed 账户…")
+        Task {
+            do {
+                var config = try await ZedAccountStore.importFromKeychain()
+                let models = try await ZedResponseService.shared.fetchModels(configuration: config)
+                config.model.available = models
+                config.model.lastSyncAt = Date().timeIntervalSince1970
+                if let firstModel = models.first {
+                    config.model.selected = firstModel.id
+                }
+                try ZedAccountStore.save(config)
+                try ProviderSettingsStore.saveActiveProvider(.zed)
+                pushPanelState(status: "Zed 登录成功，共 \(models.count) 个模型。")
+            } catch {
+                pushError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func logoutZed() {
+        do {
+            try ZedAccountStore.clear()
+            if ProviderSettingsStore.loadActiveProvider() == .zed, CodexAccountStore.load() != nil {
+                try? ProviderSettingsStore.saveActiveProvider(.codex)
+            }
+            pushPanelState(status: "已登出 Zed。")
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func refreshZedModels() {
+        guard var config = ZedAccountStore.load() else {
+            pushError("当前未登录 Zed。")
+            return
+        }
+        pushPanelState(status: "正在刷新 Zed 模型列表…")
+        Task {
+            do {
+                let models = try await ZedResponseService.shared.fetchModels(configuration: config)
+                config.model.available = models
+                config.model.lastSyncAt = Date().timeIntervalSince1970
+                if !models.isEmpty && !models.contains(where: { $0.id == config.model.selected }) {
+                    config.model.selected = models.first!.id
+                }
+                try ZedAccountStore.save(config)
+                pushPanelState(status: "Zed 模型列表已刷新，共 \(models.count) 个。")
+            } catch {
+                pushError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func switchProvider(_ rawValue: String) {
+        guard let provider = ActiveProvider(rawValue: rawValue) else {
+            return
+        }
+        do {
+            try ProviderSettingsStore.saveActiveProvider(provider)
+            let name = provider == .zed ? "Zed" : "Codex"
+            pushPanelState(status: "已切换到 \(name)。")
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func sendQuestion(_ body: [String: Any]) {
+        let prompt = (body["prompt"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !prompt.isEmpty else {
+            pushPanelState(status: "请输入问题。")
+            return
+        }
+
+        var snapshot = PanelStateStore.load()
+            ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        snapshot.messages.append(PanelConversationMessage(role: "user", kind: "question", text: prompt))
+        snapshot.status = "正在回答"
+        snapshot.updatedAt = Date().timeIntervalSince1970
+        try? PanelStateStore.save(snapshot)
+
+        pushPanelState(status: "正在回答")
+        evaluateRaw("beginStreamMessage()")
+
+        let activeProvider = resolvedActiveProvider()
+        let contextSnapshot = snapshot.context
+        let historySnapshot = snapshot.messages
+
+        Task {
+            do {
+                let stream: AsyncThrowingStream<String, Error>
+                if activeProvider == .zed {
+                    stream = ZedResponseService.shared.streamQuestion(
+                        prompt: prompt,
+                        context: contextSnapshot,
+                        history: historySnapshot
+                    )
+                } else {
+                    stream = CodexResponseService.shared.streamQuestion(
+                        prompt: prompt,
+                        context: contextSnapshot,
+                        history: historySnapshot
+                    )
+                }
+
+                var accumulated = ""
+                for try await chunk in stream {
+                    accumulated += chunk
+                    let escaped = chunk
+                        .replacingOccurrences(of: "\\", with: "\\\\")
+                        .replacingOccurrences(of: "`", with: "\\`")
+                        .replacingOccurrences(of: "$", with: "\\$")
+                    await MainActor.run {
+                        self.evaluateRaw("appendStreamChunk(`\(escaped)`)")
+                    }
+                }
+
+                var next = PanelStateStore.load() ?? snapshot
+                next.messages.append(PanelConversationMessage(role: "assistant", kind: "answer", text: accumulated))
+                next.status = "已回答"
+                next.updatedAt = Date().timeIntervalSince1970
+                try? PanelStateStore.save(next)
+                await MainActor.run {
+                    self.evaluateRaw("finalizeStreamMessage()")
+                    self.pushPanelState(status: "已回答")
+                }
+            } catch {
+                await MainActor.run {
+                    self.pushError(error.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func refreshPanelContext() {
         pushPanelState(status: "正在刷新页面…")
-        Task { [weak self] in
+        Task {
             if let latest = await SafariContextRefresher.loadFrontmostPage() {
-                var snapshot = PanelStateStore.load() ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+                var snapshot = PanelStateStore.load()
+                    ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
                 let currentContext = snapshot.context
                 snapshot.context = PanelContextSnapshot(
                     site: currentContext?.site ?? "unsupported",
@@ -254,33 +395,76 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func pushPanelState(status: String? = nil, configuration: CodexAccountConfiguration? = nil) {
-        let settings = configuration ?? CodexAccountStore.load()
         let snapshot = PanelStateStore.load()
+        let codexConfig = configuration ?? CodexAccountStore.load()
+        let zedConfig = ZedAccountStore.load()
+        let isLoggedIn = codexConfig != nil || zedConfig != nil
+        let activeProvider = resolvedActiveProvider(codexConfig: codexConfig, zedConfig: zedConfig)
+        let bothLoggedIn = codexConfig != nil && zedConfig != nil
+
+        if isLoggedIn, activeProvider != ProviderSettingsStore.loadActiveProvider() {
+            try? ProviderSettingsStore.saveActiveProvider(activeProvider)
+        }
+
+        let availableModels = buildAvailableModels(
+            codexConfig: codexConfig,
+            zedConfig: zedConfig,
+            showSource: bothLoggedIn
+        )
+
+        let selectedModel: String
+        switch activeProvider {
+        case .zed:
+            selectedModel = modelOptionID(provider: .zed, modelID: zedConfig?.model.selected ?? "")
+        case .codex:
+            selectedModel = modelOptionID(provider: .codex, modelID: codexConfig?.model.selected ?? "")
+        }
+
+        let email: Any = activeProvider == .zed
+            ? jsonValue(zedConfig?.account.name)
+            : jsonValue(codexConfig?.account.email)
+
+        let drawerState: [String: Any] = [
+            "codexEmail": jsonValue(codexConfig?.account.email),
+            "codexLoggedIn": codexConfig != nil,
+            "zedName": jsonValue(zedConfig?.account.name),
+            "zedLoggedIn": zedConfig != nil,
+            "activeProvider": activeProvider.rawValue,
+            "placementMode": loadPlacementMode().rawValue,
+            "settingsStatus": jsonValue(status ?? snapshot?.status)
+        ]
+
+        let settingsPayload: [String: Any] = [
+            "isLoggedIn": isLoggedIn,
+            "email": email,
+            "selectedModel": selectedModel,
+            "availableModels": availableModels,
+            "activeProvider": activeProvider.rawValue,
+            "drawerState": drawerState
+        ]
+
         let payload: [String: Any] = [
-            "settings": [
-                "isLoggedIn": settings != nil,
-                "email": settings?.account.email as Any,
-                "selectedModel": settings?.model.selected ?? "gpt-5",
-                "availableModels": settings?.model.available.map { ["id": $0.id, "label": $0.label] } ?? [],
-            ],
+            "settings": settingsPayload,
             "context": [
-                "url": snapshot?.context?.url as Any,
-                "title": snapshot?.context?.title as Any,
-                "selection": snapshot?.context?.selection as Any,
+                "url": jsonValue(snapshot?.context?.url),
+                "title": jsonValue(snapshot?.context?.title),
+                "selection": jsonValue(snapshot?.context?.selection)
             ],
             "messages": snapshot?.messages.map { ["role": $0.role, "kind": $0.kind, "text": $0.text] } ?? [],
-            "status": status ?? snapshot?.status as Any,
+            "status": jsonValue(status ?? snapshot?.status)
         ]
 
         evaluate(function: "renderPanelState", payload: payload)
     }
 
     private func pushError(_ message: String) {
-        var snapshot = PanelStateStore.load() ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
-        snapshot.status = message
+        var snapshot = PanelStateStore.load()
+            ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        snapshot.messages.append(PanelConversationMessage(role: "error", kind: "error", text: message))
+        snapshot.status = nil
         snapshot.updatedAt = Date().timeIntervalSince1970
         try? PanelStateStore.save(snapshot)
-        pushPanelState(status: message)
+        pushPanelState()
     }
 
     private func saveUISettings(reasoningEffort: String) throws {
@@ -290,7 +474,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let payload: [String: Any] = [
             "reasoning_effort": ["low", "medium", "high"].contains(reasoningEffort) ? reasoningEffort : "medium",
-            "placement_mode": existing["placement_mode"] as? String ?? "remember",
+            "placement_mode": existing["placement_mode"] as? String ?? "remember"
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: .atomic)
@@ -305,11 +489,14 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         payload["reasoning_effort"] = payload["reasoning_effort"] as? String ?? "medium"
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: .atomic)
+
         if let window = view.window {
+            UserDefaults.standard.removeObject(forKey: "NSWindow Frame MainChatWindow")
             WindowPlacementCoordinator.restoreOrSnap(
                 window,
                 autosaveName: "MainChatWindow",
-                placementMode: loadPlacementMode()
+                placementMode: loadPlacementMode(),
+                animated: true
             )
         }
     }
@@ -334,6 +521,77 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         return WindowPlacementCoordinator.PlacementMode(rawValue: rawValue) ?? .remember
     }
 
+    private func resolvedActiveProvider(
+        codexConfig: CodexAccountConfiguration? = CodexAccountStore.load(),
+        zedConfig: ZedAccountConfiguration? = ZedAccountStore.load()
+    ) -> ActiveProvider {
+        let storedProvider = ProviderSettingsStore.loadActiveProvider()
+
+        switch storedProvider {
+        case .codex where codexConfig != nil:
+            return .codex
+        case .zed where zedConfig != nil:
+            return .zed
+        default:
+            if zedConfig != nil, codexConfig == nil {
+                return .zed
+            }
+            return .codex
+        }
+    }
+
+    private func buildAvailableModels(
+        codexConfig: CodexAccountConfiguration?,
+        zedConfig: ZedAccountConfiguration?,
+        showSource: Bool
+    ) -> [[String: Any]] {
+        var models: [[String: Any]] = []
+
+        if let zedConfig {
+            models += zedConfig.model.available.map { model in
+                [
+                    "id": modelOptionID(provider: .zed, modelID: model.id),
+                    "label": showSource ? "\(model.label) from zed" : model.label
+                ]
+            }
+        }
+
+        if let codexConfig {
+            models += codexConfig.model.available.map { model in
+                [
+                    "id": modelOptionID(provider: .codex, modelID: model.id),
+                    "label": showSource ? "\(model.label) from codex" : model.label
+                ]
+            }
+        }
+
+        if models.isEmpty {
+            return [[
+                "id": modelOptionID(provider: .codex, modelID: "gpt-5.4-mini"),
+                "label": "gpt-5.4-mini"
+            ]]
+        }
+
+        return models
+    }
+
+    private func modelOptionID(provider: ActiveProvider, modelID: String) -> String {
+        "\(provider.rawValue)::\(modelID)"
+    }
+
+    private func parseModelSelection(_ value: String, fallback: ActiveProvider) -> (provider: ActiveProvider, modelID: String) {
+        let parts = value.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        if parts.count >= 3,
+           let provider = ActiveProvider(rawValue: String(parts[0])) {
+            return (provider, parts[2...].joined(separator: ":"))
+        }
+        return (fallback, value)
+    }
+
+    private func jsonValue(_ value: Any?) -> Any {
+        value ?? NSNull()
+    }
+
     private func evaluate(function: String, payload: [String: Any]) {
         guard
             let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -342,7 +600,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             return
         }
 
-        self.webView.evaluateJavaScript("\(function)(\(json))")
+        webView.evaluateJavaScript("\(function)(\(json))")
+    }
+
+    private func evaluateRaw(_ js: String) {
+        webView.evaluateJavaScript(js)
     }
 
     private func startPanelRefreshTimer() {

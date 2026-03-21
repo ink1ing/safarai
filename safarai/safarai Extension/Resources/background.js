@@ -13,6 +13,10 @@ browser.runtime.onInstalled.addListener(() => {
   console.log("Safari AI background ready");
 });
 
+setInterval(() => {
+  syncActiveTabSnapshot().catch(() => {});
+}, 1200);
+
 if (browser.tabs?.onUpdated) {
   browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (!tabId || (!changeInfo.url && changeInfo.status !== "complete")) {
@@ -128,6 +132,21 @@ async function loadPageContextForActiveTab() {
     pageKind: pageContext.payload.context.metadata?.pageKind ?? null,
   });
   return pageContext;
+}
+
+async function syncActiveTabSnapshot() {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    return;
+  }
+
+  const contextResult = await requestPageContext(tab.id);
+  const context = contextResult.ok
+    ? contextResult.payload?.context ?? buildFallbackContext(tab)
+    : buildFallbackContext(tab);
+
+  TAB_STATE.set(tab.id, context);
+  await syncPanelState(tab.id, context);
 }
 
 async function syncPanelStateFromContent(tabId, context) {

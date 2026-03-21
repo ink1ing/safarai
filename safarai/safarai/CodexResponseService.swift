@@ -29,18 +29,51 @@ final class CodexResponseService {
 
     private init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 30
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 120
         self.session = URLSession(configuration: config)
     }
 
-    func askQuestion(prompt: String, context: PanelContextSnapshot?, history: [PanelConversationMessage]) async throws -> String {
-        guard var configuration = CodexAccountStore.load() else {
-            throw CodexResponseError.notLoggedIn
+    // MARK: - Public API (streaming)
+
+    func streamQuestion(
+        prompt: String,
+        context: PanelContextSnapshot?,
+        history: [PanelConversationMessage]
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    guard var configuration = CodexAccountStore.load() else {
+                        throw CodexResponseError.notLoggedIn
+                    }
+                    configuration = try await CodexOAuthService.shared.refreshIfNeeded(configuration)
+                    try await self.streamCompletion(
+                        prompt: prompt,
+                        context: context,
+                        history: history,
+                        configuration: configuration,
+                        attempt: 0,
+                        continuation: continuation
+                    )
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
         }
+    }
 
-        configuration = try await CodexOAuthService.shared.refreshIfNeeded(configuration)
+    // MARK: - Streaming Completion
 
+    private func streamCompletion(
+        prompt: String,
+        context: PanelContextSnapshot?,
+        history: [PanelConversationMessage],
+        configuration: CodexAccountConfiguration,
+        attempt: Int,
+        continuation: AsyncThrowingStream<String, Error>.Continuation
+    ) async throws {
         let requestBody = buildRequestBody(
             prompt: prompt,
             context: context,
@@ -63,35 +96,127 @@ final class CodexResponseService {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
-        var lastError: Error?
-        for attempt in 0...2 {
-            do {
-                let (data, response) = try await session.data(for: request)
-                guard let http = response as? HTTPURLResponse else {
-                    throw CodexResponseError.invalidResponse
-                }
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw CodexResponseError.invalidResponse
+        }
 
-                guard (200..<300).contains(http.statusCode) else {
-                    let message = String(data: data, encoding: .utf8) ?? "unknown"
-                    if retryStatuses.contains(http.statusCode), attempt < 2 {
-                        try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(attempt)) * 600_000_000))
-                        continue
+        // Retryable status codes
+        if retryStatuses.contains(http.statusCode) && attempt < 2 {
+            // Drain to avoid resource leaks
+            for try await _ in asyncBytes {}
+            try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(attempt)) * 600_000_000))
+            try await streamCompletion(
+                prompt: prompt,
+                context: context,
+                history: history,
+                configuration: configuration,
+                attempt: attempt + 1,
+                continuation: continuation
+            )
+            return
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            var bodyData = Data()
+            for try await byte in asyncBytes { bodyData.append(byte) }
+            let message = String(data: bodyData, encoding: .utf8) ?? "unknown"
+            throw CodexResponseError.upstreamStatus(http.statusCode, message)
+        }
+
+        var receivedAny = false
+        // Buffer raw bytes and decode as UTF-8 per line to avoid mojibake
+        // that occurs when treating each byte as a Character (UnicodeScalar).
+        var lineBuffer = Data()
+
+        for try await byte in asyncBytes {
+            if byte == UInt8(ascii: "\n") {
+                if let line = String(data: lineBuffer, encoding: .utf8) {
+                    if let chunk = parseLine(line) {
+                        continuation.yield(chunk)
+                        receivedAny = true
                     }
-                    throw CodexResponseError.upstreamStatus(http.statusCode, message)
                 }
+                lineBuffer.removeAll(keepingCapacity: true)
+            } else {
+                lineBuffer.append(byte)
+            }
+        }
+        // Handle trailing line without newline
+        if !lineBuffer.isEmpty,
+           let line = String(data: lineBuffer, encoding: .utf8),
+           let chunk = parseLine(line) {
+            continuation.yield(chunk)
+            receivedAny = true
+        }
 
-                return try parseSSEText(String(data: data, encoding: .utf8) ?? "")
-            } catch {
-                lastError = error
-                if attempt < 2 {
-                    try? await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(attempt)) * 600_000_000))
-                    continue
-                }
+        if !receivedAny {
+            throw CodexResponseError.emptyContent
+        }
+    }
+
+    // MARK: - Line Parser
+
+    private func parseLine(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("data:") else { return nil }
+        let value = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value != "[DONE]", !value.isEmpty else { return nil }
+        guard let data = value.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+
+        // response.output_text.delta (primary streaming event)
+        if let type = json["type"] as? String {
+            if type == "response.output_text.delta", let delta = json["delta"] as? String, !delta.isEmpty {
+                return delta
+            }
+            if type == "response.output_text.done", let text = json["text"] as? String, !text.isEmpty {
+                return nil // already yielded via delta events
+            }
+            // response.completed fallback: extract full text if no deltas arrived
+            if type == "response.completed",
+               let response = json["response"] as? [String: Any],
+               let text = parseCompletedResponse(response), !text.isEmpty {
+                return text
+            }
+            // Legacy delta format
+            if type.contains("output_text") {
+                if let delta = json["delta"] as? String, !delta.isEmpty { return delta }
+                if let text = json["text"] as? String, !text.isEmpty { return text }
             }
         }
 
-        throw lastError ?? CodexResponseError.invalidResponse
+        // Fallback: top-level output_text
+        if let outputText = json["output_text"] as? String, !outputText.isEmpty {
+            return outputText
+        }
+
+        return nil
     }
+
+    private func parseCompletedResponse(_ response: [String: Any]) -> String? {
+        guard let output = response["output"] as? [[String: Any]] else { return nil }
+        var texts: [String] = []
+        for item in output {
+            if item["type"] as? String == "message",
+               let content = item["content"] as? [[String: Any]] {
+                for block in content {
+                    if let type = block["type"] as? String,
+                       (type == "output_text" || type == "text"),
+                       let text = block["text"] as? String, !text.isEmpty {
+                        texts.append(text)
+                    }
+                }
+            } else if item["type"] as? String == "output_text",
+                      let text = item["text"] as? String, !text.isEmpty {
+                texts.append(text)
+            }
+        }
+        let value = texts.joined()
+        return value.isEmpty ? nil : value
+    }
+
+    // MARK: - Request Builder
 
     private func buildRequestBody(
         prompt: String,
@@ -128,83 +253,15 @@ final class CodexResponseService {
                 [
                     "type": "message",
                     "role": "user",
-                    "content": [
-                        [
-                            "type": "input_text",
-                            "text": finalPrompt,
-                        ]
-                    ],
+                    "content": [["type": "input_text", "text": finalPrompt]],
                 ]
             ],
             "instructions": instructions,
             "stream": true,
             "store": false,
             "parallel_tool_calls": true,
-            "reasoning": [
-                "effort": "medium",
-                "summary": "auto",
-            ],
+            "reasoning": ["effort": "medium", "summary": "auto"],
             "include": ["reasoning.encrypted_content"],
         ]
-    }
-
-    private func parseSSEText(_ text: String) throws -> String {
-        let lines = text.split(separator: "\n")
-        var chunks: [String] = []
-
-        for line in lines {
-            guard line.hasPrefix("data:") else { continue }
-            let value = line.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard value != "[DONE]", let data = value.data(using: .utf8) else { continue }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-
-            if let type = json["type"] as? String, type == "response.completed",
-               let response = json["response"] as? [String: Any],
-               let parsed = parseCompletedResponse(response) {
-                return parsed
-            }
-
-            if let outputText = json["output_text"] as? String, !outputText.isEmpty {
-                chunks.append(outputText)
-            } else if let delta = json["delta"] as? String, let type = json["type"] as? String, type.contains("output_text") {
-                chunks.append(delta)
-            } else if let textValue = json["text"] as? String, let type = json["type"] as? String, type.contains("output_text") {
-                chunks.append(textValue)
-            }
-        }
-
-        let combined = chunks.joined()
-        guard !combined.isEmpty else {
-            throw CodexResponseError.emptyContent
-        }
-        return combined
-    }
-
-    private func parseCompletedResponse(_ response: [String: Any]) -> String? {
-        guard let output = response["output"] as? [[String: Any]] else {
-            return nil
-        }
-
-        var texts: [String] = []
-        for item in output {
-            if item["type"] as? String == "message",
-               let content = item["content"] as? [[String: Any]] {
-                for block in content {
-                    if let type = block["type"] as? String,
-                       (type == "output_text" || type == "text"),
-                       let text = block["text"] as? String,
-                       !text.isEmpty {
-                        texts.append(text)
-                    }
-                }
-            } else if item["type"] as? String == "output_text",
-                      let text = item["text"] as? String,
-                      !text.isEmpty {
-                texts.append(text)
-            }
-        }
-
-        let value = texts.joined()
-        return value.isEmpty ? nil : value
     }
 }

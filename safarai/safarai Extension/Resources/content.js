@@ -13,6 +13,8 @@ import {
 let activeWriteTarget = null;
 let lastKnownURL = window.location.href;
 
+patchHistoryMethods();
+
 queueContextSync();
 
 browser.runtime.onMessage.addListener((message) => {
@@ -168,4 +170,22 @@ function queueContextSync() {
       // Ignore transient DOM read failures during page bootstrap.
     }
   }, 0);
+}
+
+function patchHistoryMethods() {
+  const wrap = (methodName) => {
+    const original = window.history[methodName];
+    if (typeof original !== "function") {
+      return;
+    }
+
+    window.history[methodName] = function (...args) {
+      const result = original.apply(this, args);
+      queueContextSync();
+      return result;
+    };
+  };
+
+  wrap("pushState");
+  wrap("replaceState");
 }
