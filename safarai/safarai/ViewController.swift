@@ -851,9 +851,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         let snapshot = await captureSafariWindowSnapshot()
         guard !snapshot.isEmpty else {
             return [
-                "ok": false,
-                "errorCode": "safari_not_available",
-                "humanSummary": AppText.localized(en: "Safari is not available or has no open windows.", zh: "Safari 不可用，或当前没有打开的窗口。"),
+                "ok": true,
+                "humanSummary": AppText.localized(en: "Safari currently has no open windows.", zh: "Safari 当前没有打开的窗口。"),
+                "data": [
+                    "windows": [],
+                ],
             ]
         }
 
@@ -874,9 +876,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             let activeTab = tabs.first(where: { ($0["active"] as? Bool) == true }) ?? tabs.first
         else {
             return [
-                "ok": false,
-                "errorCode": "frontmost_tab_not_found",
-                "humanSummary": AppText.localized(en: "Unable to read the current Safari tab.", zh: "无法读取当前 Safari 标签页。"),
+                "ok": true,
+                "humanSummary": AppText.localized(en: "Safari has no active tab yet.", zh: "Safari 当前还没有活动标签页。"),
+                "data": [
+                    "tab": NSNull(),
+                ],
             ]
         }
 
