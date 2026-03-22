@@ -22,6 +22,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private var safariWindowFollower: SafariWindowFollower?
     private var agentSessionState: [String: Any]?
     private var agentApprovalContinuation: CheckedContinuation<Bool, Never>?
+    private var safariToolWindowRegistry: [Int: SFSafariWindow] = [:]
+    private var safariToolTabRegistry: [Int: SFSafariTab] = [:]
+    private var nextSafariToolWindowID = 1
+    private var nextSafariToolTabID = 1
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -693,6 +697,16 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     let callId = functionCall["callId"] as? String ?? ""
                     var toolArgs = functionCall["arguments"] as? [String: Any] ?? [:]
                     toolArgs = injectLockedTabIDIfNeeded(toolName: toolName, arguments: toolArgs, lockedTabId: lockedTabId)
+                    accumulatedSteps.append(
+                        buildAgentStep(
+                            kind: "tool_call",
+                            title: toolDisplayTitle(toolName),
+                            detail: toolDisplayDetail(toolName: toolName, arguments: toolArgs),
+                            status: "done",
+                            toolName: toolName,
+                            tabId: normalizedInt(from: toolArgs["tabId"])
+                        )
+                    )
 
                     let executionStatus = isScriptTool(toolName)
                         ? "running_script"
@@ -724,7 +738,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     accumulatedSteps.append(
                         buildAgentStep(
                             kind: isScriptTool(toolName) ? "script_result" : "tool_result",
-                            title: toolName,
+                            title: toolResultTitle(toolName: toolName, result: toolResult),
                             detail: String(describing: toolResult["humanSummary"] ?? toolName),
                             status: (toolResult["ok"] as? Bool) == false ? "failed" : "done",
                             toolName: toolName,
@@ -792,6 +806,23 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func executeAgentTool(toolName: String, arguments: [String: Any]) async throws -> [String: Any] {
+        switch toolName {
+        case "list_safari_windows_tabs":
+            return await listSafariWindowsTabs()
+        case "get_frontmost_tab":
+            return await getFrontmostSafariTab()
+        case "activate_tab":
+            return await activateSafariTab(arguments: arguments)
+        case "open_tab":
+            return await openSafariTab(arguments: arguments)
+        case "close_tab":
+            return await closeSafariTab(arguments: arguments)
+        case "navigate_tab":
+            return await navigateSafariTab(arguments: arguments)
+        default:
+            break
+        }
+
         if toolName == "run_shell_command" {
             return await runAgentShellCommand(arguments: arguments)
         }
@@ -815,6 +846,284 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "errorCode": "tool_timeout",
             "humanSummary": AppText.localized(en: "Tool execution timed out.", zh: "工具执行超时。")
         ]
+    }
+
+    private func listSafariWindowsTabs() async -> [String: Any] {
+        let snapshot = await captureSafariWindowSnapshot()
+        guard !snapshot.isEmpty else {
+            return [
+                "ok": false,
+                "errorCode": "safari_not_available",
+                "humanSummary": AppText.localized(en: "Safari is not available or has no open windows.", zh: "Safari 不可用，或当前没有打开的窗口。"),
+            ]
+        }
+
+        return [
+            "ok": true,
+            "humanSummary": AppText.localized(en: "Loaded Safari windows and tabs.", zh: "已获取 Safari 窗口和标签页。"),
+            "data": [
+                "windows": snapshot,
+            ],
+        ]
+    }
+
+    private func getFrontmostSafariTab() async -> [String: Any] {
+        let snapshot = await captureSafariWindowSnapshot()
+        guard
+            let frontmostWindow = snapshot.first(where: { ($0["focused"] as? Bool) == true }) ?? snapshot.first,
+            let tabs = frontmostWindow["tabs"] as? [[String: Any]],
+            let activeTab = tabs.first(where: { ($0["active"] as? Bool) == true }) ?? tabs.first
+        else {
+            return [
+                "ok": false,
+                "errorCode": "frontmost_tab_not_found",
+                "humanSummary": AppText.localized(en: "Unable to read the current Safari tab.", zh: "无法读取当前 Safari 标签页。"),
+            ]
+        }
+
+        return [
+            "ok": true,
+            "humanSummary": AppText.localized(en: "Loaded the current Safari tab.", zh: "已获取当前 Safari 标签页。"),
+            "data": [
+                "tab": activeTab,
+            ],
+        ]
+    }
+
+    private func activateSafariTab(arguments: [String: Any]) async -> [String: Any] {
+        guard let tabId = normalizedInt(from: arguments["tabId"]),
+              let tab = safariToolTabRegistry[tabId] else {
+            return [
+                "ok": false,
+                "errorCode": "tab_not_found",
+                "humanSummary": AppText.localized(en: "Tab id is missing or stale. List tabs again.", zh: "标签页 id 缺失或已失效，请先重新获取标签页列表。"),
+            ]
+        }
+
+        await withCheckedContinuation { continuation in
+            tab.activate {
+                continuation.resume()
+            }
+        }
+
+        return [
+            "ok": true,
+            "humanSummary": AppText.localized(en: "Switched to the target tab.", zh: "已切换到目标标签页。"),
+            "tabId": tabId,
+        ]
+    }
+
+    private func openSafariTab(arguments: [String: Any]) async -> [String: Any] {
+        let rawURL = String(describing: arguments["url"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: rawURL), !rawURL.isEmpty else {
+            return [
+                "ok": false,
+                "errorCode": "missing_url",
+                "humanSummary": AppText.localized(en: "A valid URL is required.", zh: "需要有效的 URL。"),
+            ]
+        }
+
+        let makeActive = (arguments["active"] as? Bool) != false
+        if let windowId = normalizedInt(from: arguments["windowId"]),
+           let window = safariToolWindowRegistry[windowId] {
+            let tab = await withCheckedContinuation { continuation in
+                window.openTab(with: url, makeActiveIfPossible: makeActive) { tab in
+                    continuation.resume(returning: tab)
+                }
+            }
+            let refreshed = await captureSafariWindowSnapshot()
+            let tabPayload = resolvePayloadForRegisteredTab(tab, from: refreshed)
+            return [
+                "ok": tabPayload != nil,
+                "errorCode": tabPayload == nil ? "open_tab_failed" : "",
+                "humanSummary": tabPayload == nil
+                    ? AppText.localized(en: "Safari did not return the new tab.", zh: "Safari 未返回新标签页。")
+                    : AppText.localized(en: "Opened a new tab.", zh: "已打开新标签页。"),
+                "data": tabPayload as Any,
+                "tabId": tabPayload?["tabId"] as Any,
+            ]
+        }
+
+        let window = await withCheckedContinuation { continuation in
+            SFSafariApplication.openWindow(with: url) { window in
+                continuation.resume(returning: window)
+            }
+        }
+        let refreshed = await captureSafariWindowSnapshot()
+        guard
+            window != nil,
+            let frontmostWindow = refreshed.first(where: { ($0["focused"] as? Bool) == true }) ?? refreshed.first,
+            let tabs = frontmostWindow["tabs"] as? [[String: Any]],
+            let tabPayload = tabs.first(where: { ($0["active"] as? Bool) == true }) ?? tabs.first
+        else {
+            return [
+                "ok": false,
+                "errorCode": "open_window_failed",
+                "humanSummary": AppText.localized(en: "Unable to open Safari window.", zh: "无法打开 Safari 窗口。"),
+            ]
+        }
+
+        return [
+            "ok": true,
+            "humanSummary": AppText.localized(en: "Opened a new Safari tab.", zh: "已打开新的 Safari 标签页。"),
+            "data": tabPayload,
+            "tabId": tabPayload["tabId"] as Any,
+        ]
+    }
+
+    private func closeSafariTab(arguments: [String: Any]) async -> [String: Any] {
+        guard let tabId = normalizedInt(from: arguments["tabId"]),
+              let tab = safariToolTabRegistry[tabId] else {
+            return [
+                "ok": false,
+                "errorCode": "tab_not_found",
+                "humanSummary": AppText.localized(en: "Tab id is missing or stale. List tabs again.", zh: "标签页 id 缺失或已失效，请先重新获取标签页列表。"),
+            ]
+        }
+        tab.close()
+        safariToolTabRegistry.removeValue(forKey: tabId)
+        return [
+            "ok": true,
+            "humanSummary": AppText.localized(en: "Closed the target tab.", zh: "已关闭目标标签页。"),
+            "tabId": tabId,
+        ]
+    }
+
+    private func navigateSafariTab(arguments: [String: Any]) async -> [String: Any] {
+        guard let tabId = normalizedInt(from: arguments["tabId"]),
+              let tab = safariToolTabRegistry[tabId] else {
+            return [
+                "ok": false,
+                "errorCode": "tab_not_found",
+                "humanSummary": AppText.localized(en: "Tab id is missing or stale. List tabs again.", zh: "标签页 id 缺失或已失效，请先重新获取标签页列表。"),
+            ]
+        }
+        let rawURL = String(describing: arguments["url"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: rawURL), !rawURL.isEmpty else {
+            return [
+                "ok": false,
+                "errorCode": "missing_url",
+                "humanSummary": AppText.localized(en: "A valid URL is required.", zh: "需要有效的 URL。"),
+            ]
+        }
+
+        if (arguments["active"] as? Bool) != false {
+            await withCheckedContinuation { continuation in
+                tab.activate {
+                    continuation.resume()
+                }
+            }
+        }
+        tab.navigate(to: url)
+        return [
+            "ok": true,
+            "humanSummary": AppText.localized(en: "Opened the requested page.", zh: "已打开请求的页面。"),
+            "tabId": tabId,
+            "data": [
+                "tabId": tabId,
+                "url": rawURL,
+            ],
+        ]
+    }
+
+    private func captureSafariWindowSnapshot() async -> [[String: Any]] {
+        let windows = await withCheckedContinuation { continuation in
+            SFSafariApplication.getAllWindows { windows in
+                continuation.resume(returning: windows)
+            }
+        }
+
+        safariToolWindowRegistry.removeAll()
+        safariToolTabRegistry.removeAll()
+        nextSafariToolWindowID = 1
+        nextSafariToolTabID = 1
+
+        var serializedWindows: [[String: Any]] = []
+        for window in windows {
+            let windowID = nextSafariToolWindowID
+            nextSafariToolWindowID += 1
+            safariToolWindowRegistry[windowID] = window
+
+            let tabs = await withCheckedContinuation { continuation in
+                window.getAllTabs { tabs in
+                    continuation.resume(returning: tabs)
+                }
+            }
+            let activeTab = await withCheckedContinuation { continuation in
+                window.getActiveTab { tab in
+                    continuation.resume(returning: tab)
+                }
+            }
+
+            var serializedTabs: [[String: Any]] = []
+            for (index, tab) in tabs.enumerated() {
+                let tabID = nextSafariToolTabID
+                nextSafariToolTabID += 1
+                safariToolTabRegistry[tabID] = tab
+
+                let properties = await loadTabProperties(tab)
+                serializedTabs.append([
+                    "tabId": tabID,
+                    "windowId": windowID,
+                    "index": index,
+                    "active": activeTab == tab,
+                    "pinned": false,
+                    "status": "complete",
+                    "title": properties.title,
+                    "url": properties.url,
+                ])
+            }
+
+            serializedWindows.append([
+                "windowId": windowID,
+                "focused": window === windows.first,
+                "state": "normal",
+                "tabCount": serializedTabs.count,
+                "tabs": serializedTabs,
+            ])
+        }
+
+        return serializedWindows
+    }
+
+    private func loadTabProperties(_ tab: SFSafariTab) async -> (title: String, url: String) {
+        let page = await withCheckedContinuation { continuation in
+            tab.getActivePage { page in
+                continuation.resume(returning: page)
+            }
+        }
+        guard let page else {
+            return ("", "")
+        }
+
+        return await withCheckedContinuation { continuation in
+            page.getPropertiesWithCompletionHandler { properties in
+                continuation.resume(returning: (
+                    properties?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+                    properties?.url?.absoluteString ?? ""
+                ))
+            }
+        }
+    }
+
+    private func resolvePayloadForRegisteredTab(_ tab: SFSafariTab?, from windows: [[String: Any]]) -> [String: Any]? {
+        guard let tab else {
+            return nil
+        }
+
+        for window in windows {
+            guard let tabs = window["tabs"] as? [[String: Any]] else {
+                continue
+            }
+            for payload in tabs {
+                guard let payloadTabId = payload["tabId"] as? Int,
+                      safariToolTabRegistry[payloadTabId] === tab else {
+                    continue
+                }
+                return payload
+            }
+        }
+        return nil
     }
 
     private func loadInitialAgentLockedTabID() async -> Int? {
@@ -901,6 +1210,100 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             return nil
         }
         return String(normalized.prefix(280))
+    }
+
+    private func toolDisplayTitle(_ toolName: String) -> String {
+        switch toolName {
+        case "list_safari_windows_tabs":
+            return AppText.localized(en: "Checking Safari tabs", zh: "正在检查 Safari 标签页")
+        case "get_frontmost_tab":
+            return AppText.localized(en: "Reading current tab", zh: "正在读取当前标签页")
+        case "activate_tab":
+            return AppText.localized(en: "Switching tab", zh: "正在切换标签页")
+        case "open_tab":
+            return AppText.localized(en: "Opening tab", zh: "正在打开标签页")
+        case "close_tab":
+            return AppText.localized(en: "Closing tab", zh: "正在关闭标签页")
+        case "navigate_tab", "navigate_page":
+            return AppText.localized(en: "Opening page", zh: "正在打开页面")
+        case "get_page_context":
+            return AppText.localized(en: "Reading page context", zh: "正在读取页面上下文")
+        case "list_interactive_targets":
+            return AppText.localized(en: "Scanning page actions", zh: "正在扫描页面操作目标")
+        case "click_target":
+            return AppText.localized(en: "Clicking target", zh: "正在点击目标")
+        case "read_target":
+            return AppText.localized(en: "Reading target", zh: "正在读取目标")
+        case "fill_target":
+            return AppText.localized(en: "Filling input", zh: "正在填写输入框")
+        case "run_shell_command":
+            return AppText.localized(en: "Running shell command", zh: "正在执行 shell 命令")
+        case "run_applescript":
+            return AppText.localized(en: "Running AppleScript", zh: "正在执行 AppleScript")
+        default:
+            return toolName
+        }
+    }
+
+    private func toolDisplayDetail(toolName: String, arguments: [String: Any]) -> String {
+        switch toolName {
+        case "open_tab", "navigate_tab", "navigate_page":
+            return String(describing: arguments["url"] ?? "")
+        case "activate_tab", "close_tab":
+            if let tabId = normalizedInt(from: arguments["tabId"]) {
+                return "tabId=\(tabId)"
+            }
+            return ""
+        case "fill_target":
+            let target = String(describing: arguments["targetId"] ?? "")
+            let text = previewText(arguments["text"]) ?? ""
+            return [target, text].filter { !$0.isEmpty }.joined(separator: "\n")
+        case "click_target", "read_target":
+            return String(describing: arguments["targetId"] ?? "")
+        case "run_shell_command":
+            return String(describing: arguments["command"] ?? "")
+        case "run_applescript":
+            return previewText(arguments["script"]) ?? ""
+        default:
+            return ""
+        }
+    }
+
+    private func toolResultTitle(toolName: String, result: [String: Any]) -> String {
+        if (result["ok"] as? Bool) == false {
+            return AppText.localized(en: "Action failed", zh: "执行失败")
+        }
+
+        switch toolName {
+        case "list_safari_windows_tabs":
+            return AppText.localized(en: "Safari tabs loaded", zh: "已获取 Safari 标签页")
+        case "get_frontmost_tab":
+            return AppText.localized(en: "Current tab loaded", zh: "已获取当前标签页")
+        case "activate_tab":
+            return AppText.localized(en: "Switched tab", zh: "已切换标签页")
+        case "open_tab":
+            return AppText.localized(en: "Tab opened", zh: "已打开标签页")
+        case "close_tab":
+            return AppText.localized(en: "Tab closed", zh: "已关闭标签页")
+        case "navigate_tab", "navigate_page":
+            return AppText.localized(en: "Page opened", zh: "已打开页面")
+        case "get_page_context":
+            return AppText.localized(en: "Page context loaded", zh: "已读取页面上下文")
+        case "list_interactive_targets":
+            return AppText.localized(en: "Page actions loaded", zh: "已获取页面操作目标")
+        case "click_target":
+            return AppText.localized(en: "Clicked target", zh: "已点击目标")
+        case "read_target":
+            return AppText.localized(en: "Read target", zh: "已读取目标")
+        case "fill_target":
+            return AppText.localized(en: "Input filled", zh: "已填写输入框")
+        case "run_shell_command":
+            return AppText.localized(en: "Shell command finished", zh: "Shell 命令已完成")
+        case "run_applescript":
+            return AppText.localized(en: "AppleScript finished", zh: "AppleScript 已完成")
+        default:
+            return toolName
+        }
     }
 
     private func replayableAgentItems(from response: [String: Any]) -> [[String: Any]] {
