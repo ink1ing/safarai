@@ -1348,7 +1348,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                         return nil
                     }
                     return [
-                        "type": "input_text",
+                        "type": "output_text",
                         "text": text,
                     ]
                 }
@@ -1420,8 +1420,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             processArguments += ["-l", "JavaScript"]
         }
         processArguments += ["-e", script]
-
-        return await runHostProcess(
+        var result = await runHostProcess(
             executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
             arguments: processArguments,
             cwd: nil,
@@ -1430,6 +1429,35 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             failurePrefix: AppText.localized(en: "AppleScript failed", zh: "AppleScript 执行失败"),
             timeoutSummary: AppText.localized(en: "AppleScript timed out.", zh: "AppleScript 执行超时。")
         )
+        if shouldRetrySafariAppleScript(result: result, script: script) {
+            _ = openSafariViaWorkspace(url: URL(string: "https://www.yahoo.com")!)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            result = await runHostProcess(
+                executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
+                arguments: processArguments,
+                cwd: nil,
+                timeoutMs: timeoutMs,
+                successSummary: AppText.localized(en: "AppleScript completed.", zh: "AppleScript 执行完成。"),
+                failurePrefix: AppText.localized(en: "AppleScript failed", zh: "AppleScript 执行失败"),
+                timeoutSummary: AppText.localized(en: "AppleScript timed out.", zh: "AppleScript 执行超时。")
+            )
+        }
+        return result
+    }
+
+    private func shouldRetrySafariAppleScript(result: [String: Any], script: String) -> Bool {
+        guard (result["ok"] as? Bool) != true else {
+            return false
+        }
+        let combined = [
+            String(describing: result["humanSummary"] ?? ""),
+            String(describing: result["stderr"] ?? ""),
+            script
+        ]
+            .joined(separator: "\n")
+            .lowercased()
+        return combined.contains("safari")
+            && (combined.contains("isn’t running") || combined.contains("isn't running") || combined.contains("(-600)"))
     }
 
     private func boundedTimeout(_ value: Any?, defaultValue: Int, maximum: Int) -> Int {
