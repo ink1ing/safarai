@@ -114,7 +114,7 @@ final class CodexResponseService {
             "tools": tools,
             "tool_choice": "auto",
             "stream": true,
-            "store": true,
+            "store": false,
             "parallel_tool_calls": false,
             "reasoning": ["effort": "medium", "summary": "auto"],
             "instructions": """

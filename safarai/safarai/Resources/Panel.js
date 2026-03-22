@@ -959,7 +959,7 @@ function renderPanelState(payload) {
   );
   // Don't clobber a live stream with a full re-render
   if (!_streamingEntry) {
-    renderMessages(messages);
+    renderMessages(messages, agent);
   }
   contextURL.textContent = context?.url || "";
   contextPreviewURL.textContent = context?.url || "";
@@ -1227,19 +1227,9 @@ function renderAgentState(agent) {
     agentApprovalPreview.textContent = String(pendingApproval.previewText || pendingApproval.toolName || "");
   }
   agentCancelButton.classList.toggle("is-hidden", !(agentStatus === "planning" || agentStatus === "executing" || agentStatus === "awaiting_approval" || agentStatus === "running_script"));
-
-  const steps = Array.isArray(agent?.steps) ? agent.steps : [];
-  const shouldShowAgentCard = !!agent && (steps.length > 0 || agentStatus || agent?.error || agent?.finalAnswer);
-  agentRunCard.classList.toggle("is-hidden", !shouldShowAgentCard);
-  if (!shouldShowAgentCard) {
-    agentRunStatus.textContent = "";
-    agentStepList.innerHTML = "";
-    return;
-  }
-
-  agentRunTitle.textContent = currentLanguage() === "zh" ? "Agent 执行轨迹" : "Agent Activity";
-  agentRunStatus.textContent = formatAgentStatus(agentStatus, agent?.error);
-  renderAgentSteps(steps, agent);
+  agentRunCard.classList.add("is-hidden");
+  agentRunStatus.textContent = "";
+  agentStepList.innerHTML = "";
 }
 
 function formatAgentStatus(status, error) {
@@ -1409,14 +1399,15 @@ function syncSelectedModelDisplay() {
     selectedOption?.dataset.displayLabel || selectedOption?.textContent || "选择模型";
 }
 
-function renderMessages(messages) {
+function renderMessages(messages, agent = null) {
   conversationList.innerHTML = "";
+  const mergedMessages = [...messages, ...buildAgentTimelineMessages(agent)];
 
-  if (!messages.length) {
+  if (!mergedMessages.length) {
     return;
   }
 
-  for (const item of messages) {
+  for (const item of mergedMessages) {
     const role = item.role || "system";
     const entry = document.createElement("div");
     entry.className = "conversation-item";
@@ -1435,6 +1426,60 @@ function renderMessages(messages) {
     }
     conversationList.appendChild(entry);
   }
+}
+
+function buildAgentTimelineMessages(agent) {
+  if (!agent || typeof agent !== "object") {
+    return [];
+  }
+
+  const result = [];
+  const steps = Array.isArray(agent.steps) ? agent.steps : [];
+  for (const step of steps) {
+    const kind = String(step?.kind || "");
+    if (!["plan", "context", "tool_call", "tool_result", "script_result"].includes(kind)) {
+      continue;
+    }
+
+    const title = String(step?.title || step?.toolName || "Agent");
+    const detail = String(step?.detail || "").trim();
+    const metaParts = [];
+    if (step?.toolName && step.toolName !== title) {
+      metaParts.push(String(step.toolName));
+    }
+    if (Number.isFinite(Number(step?.tabId))) {
+      metaParts.push(`tab ${step.tabId}`);
+    }
+    if (Number.isFinite(Number(step?.durationMs))) {
+      metaParts.push(`${step.durationMs}ms`);
+    }
+    const preview = [step?.stdoutPreview, step?.stderrPreview]
+      .filter((value) => typeof value === "string" && value.trim())
+      .join("\n");
+
+    const lines = [
+      `**${escapeMarkdown(title)}**`,
+      metaParts.length ? metaParts.join(" · ") : "",
+      detail,
+      preview,
+    ].filter(Boolean);
+
+    result.push({
+      role: step?.status === "failed" ? "error" : "assistant",
+      kind: "agent_timeline",
+      text: lines.join("\n\n"),
+    });
+  }
+
+  if (agent?.error) {
+    result.push({
+      role: "error",
+      kind: "agent_error",
+      text: String(agent.error),
+    });
+  }
+
+  return result;
 }
 
 function renderConversationMessageContent(item, role) {
@@ -1808,6 +1853,10 @@ function escapeAttribute(value) {
     .replaceAll("\"", "&quot;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function escapeMarkdown(value) {
+  return String(value || "").replace(/([\\`*_{}\[\]()#+\-.!|>])/g, "\\$1");
 }
 
 function renderMarkdown(value) {
