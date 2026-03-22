@@ -1447,10 +1447,10 @@ function buildAgentTimelineMessages(agent) {
     if (step?.toolName && step.toolName !== title) {
       metaParts.push(String(step.toolName));
     }
-    if (Number.isFinite(Number(step?.tabId))) {
+    if (hasNumericValue(step?.tabId)) {
       metaParts.push(`tab ${step.tabId}`);
     }
-    if (Number.isFinite(Number(step?.durationMs))) {
+    if (hasNumericValue(step?.durationMs)) {
       metaParts.push(`${step.durationMs}ms`);
     }
     const preview = [step?.stdoutPreview, step?.stderrPreview]
@@ -1480,6 +1480,16 @@ function buildAgentTimelineMessages(agent) {
   }
 
   return result;
+}
+
+function hasNumericValue(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return Number.isFinite(Number(value));
+  }
+  return false;
 }
 
 function renderConversationMessageContent(item, role) {

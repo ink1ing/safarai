@@ -1923,7 +1923,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "name": name,
             "description": description,
             "parameters": parameters,
-            "strict": true,
         ]
     }
 
