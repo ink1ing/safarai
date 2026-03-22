@@ -929,9 +929,9 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         let makeActive = (arguments["active"] as? Bool) != false
         if let windowId = normalizedInt(from: arguments["windowId"]),
            let window = safariToolWindowRegistry[windowId] {
-            let tab = await withCheckedContinuation { continuation in
+            let tab = await awaitSafariCallback(fallback: Optional<SFSafariTab>.none) { completion in
                 window.openTab(with: url, makeActiveIfPossible: makeActive) { tab in
-                    continuation.resume(returning: tab)
+                    completion(tab)
                 }
             }
             let refreshed = await captureSafariWindowSnapshot()
@@ -947,14 +947,19 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             ]
         }
 
-        let window = await withCheckedContinuation { continuation in
+        let window = await awaitSafariCallback(fallback: Optional<SFSafariWindow>.none) { completion in
             SFSafariApplication.openWindow(with: url) { window in
-                continuation.resume(returning: window)
+                completion(window)
+            }
+        }
+        if window == nil {
+            let launched = openSafariViaWorkspace(url: url)
+            if launched {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
         }
         let refreshed = await captureSafariWindowSnapshot()
         guard
-            window != nil,
             let frontmostWindow = refreshed.first(where: { ($0["focused"] as? Bool) == true }) ?? refreshed.first,
             let tabs = frontmostWindow["tabs"] as? [[String: Any]],
             let tabPayload = tabs.first(where: { ($0["active"] as? Bool) == true }) ?? tabs.first
@@ -1143,6 +1148,22 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 box.resume(continuation, value: fallback())
             }
         }
+    }
+
+    private func openSafariViaWorkspace(url: URL) -> Bool {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+
+        if let safariAppURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") {
+            do {
+                try NSWorkspace.shared.open([url], withApplicationAt: safariAppURL, configuration: configuration)
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        return NSWorkspace.shared.open(url)
     }
 
     private func injectLockedTabIDIfNeeded(
