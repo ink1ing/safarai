@@ -125,21 +125,9 @@ final class CodexResponseService {
 禁止编造页面状态、标签页状态或脚本执行结果。
 """,
         ]
-        if let previousResponseId, !previousResponseId.isEmpty {
-            body["previous_response_id"] = previousResponseId
-        }
-
-        do {
-            return try await performAgentResponseRequest(body: body, configuration: configuration)
-        } catch CodexResponseError.upstreamStatus(let status, _) where previousResponseId != nil && (400..<500).contains(status) {
-            guard let fallbackInput, !fallbackInput.isEmpty else {
-                throw CodexResponseError.upstreamStatus(status, "previous_response_id failed and no fallback input was provided")
-            }
-            var fallbackBody = body
-            fallbackBody["previous_response_id"] = NSNull()
-            fallbackBody["input"] = fallbackInput
-            return try await performAgentResponseRequest(body: fallbackBody, configuration: configuration)
-        }
+        _ = previousResponseId
+        _ = fallbackInput
+        return try await performAgentResponseRequest(body: body, configuration: configuration)
     }
 
     func streamQuestion(

@@ -47,6 +47,9 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     override func viewDidAppear() {
         super.viewDidAppear()
         if let window = view.window {
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.title = ""
             WindowPlacementCoordinator.restoreOrSnap(
                 window,
                 autosaveName: "MainChatWindow",
@@ -630,8 +633,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         var latestResponseId: String?
         var accumulatedSteps = (agentSessionState?["steps"] as? [[String: Any]]) ?? []
         do {
-            var currentInput = [buildAgentUserInput(prompt: prompt, attachments: attachments)]
-            var transcript = currentInput
+            var transcript = [buildAgentUserInput(prompt: prompt, attachments: attachments)]
             var finalAnswer = ""
             var lockedTabId = await loadInitialAgentLockedTabID()
 
@@ -655,15 +657,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 try Task.checkCancellation()
 
                 let response = try await CodexResponseService.shared.createAgentResponse(
-                    input: currentInput,
-                    tools: buildAgentToolDefinitions(),
-                    previousResponseId: latestResponseId,
-                    fallbackInput: transcript
+                    input: transcript,
+                    tools: buildAgentToolDefinitions()
                 )
                 latestResponseId = response["id"] as? String ?? latestResponseId
-                if let outputItems = response["output"] as? [[String: Any]], !outputItems.isEmpty {
-                    transcript.append(contentsOf: outputItems)
-                }
+                transcript.append(contentsOf: replayableAgentItems(from: response))
 
                 let parsed = parseAgentResponse(response)
                 if !parsed.steps.isEmpty {
@@ -690,7 +688,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     break
                 }
 
-                var nextInput: [[String: Any]] = []
                 for functionCall in parsed.functionCalls {
                     let toolName = functionCall["name"] as? String ?? ""
                     let callId = functionCall["callId"] as? String ?? ""
@@ -743,7 +740,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                         "call_id": callId,
                         "output": stringifyJSON(toolResult),
                     ]
-                    nextInput.append(functionOutput)
                     transcript.append(functionOutput)
 
                     await MainActor.run {
@@ -759,7 +755,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     }
                 }
 
-                currentInput = nextInput
             }
 
             await MainActor.run {
@@ -906,6 +901,46 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             return nil
         }
         return String(normalized.prefix(280))
+    }
+
+    private func replayableAgentItems(from response: [String: Any]) -> [[String: Any]] {
+        let output = response["output"] as? [[String: Any]] ?? []
+        return output.compactMap { item in
+            let type = item["type"] as? String ?? ""
+            if type == "message" {
+                let content = (item["content"] as? [[String: Any]] ?? []).compactMap { block -> [String: Any]? in
+                    let blockType = block["type"] as? String ?? ""
+                    guard (blockType == "output_text" || blockType == "text"),
+                          let text = block["text"] as? String,
+                          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        return nil
+                    }
+                    return [
+                        "type": "input_text",
+                        "text": text,
+                    ]
+                }
+                guard !content.isEmpty else {
+                    return nil
+                }
+                return [
+                    "type": "message",
+                    "role": item["role"] as? String ?? "assistant",
+                    "content": content,
+                ]
+            }
+
+            if type == "function_call" {
+                return [
+                    "type": "function_call",
+                    "call_id": item["call_id"] as? String ?? "",
+                    "name": item["name"] as? String ?? "",
+                    "arguments": item["arguments"] as? String ?? "{}",
+                ]
+            }
+
+            return nil
+        }
     }
 
     private func runAgentShellCommand(arguments: [String: Any]) async -> [String: Any] {
