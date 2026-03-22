@@ -111,7 +111,7 @@
                                     登录
                                 </button>
                                 <button
-                                    class="settings-btn settings-btn-danger"
+                                    class="settings-btn"
                                     id="sd-logout-codex"
                                     type="button"
                                 >
@@ -136,11 +136,53 @@
                                     导入 Zed
                                 </button>
                                 <button
-                                    class="settings-btn settings-btn-danger"
+                                    class="settings-btn"
                                     id="sd-logout-zed"
                                     type="button"
                                 >
                                     退出
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-label">颜色风格</div>
+                            <div class="settings-button-row">
+                                <button class="settings-btn" id="sd-theme-blue" type="button">蓝色</button>
+                                <button class="settings-btn" id="sd-theme-orange" type="button">橙色</button>
+                                <button class="settings-btn" id="sd-theme-gray" type="button">灰色</button>
+                                <button class="settings-btn" id="sd-theme-purple" type="button">紫色</button>
+                                <button class="settings-btn" id="sd-theme-green" type="button">绿色</button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-label">信息显示</div>
+                            <div class="settings-button-row">
+                                <button class="settings-btn" id="sd-toggle-page-info" type="button">当前页面</button>
+                                <button class="settings-btn" id="sd-toggle-status-info" type="button">当前状态</button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-label">System Prompt</div>
+                            <textarea
+                                id="sd-system-prompt-editor"
+                                class="settings-textarea"
+                                rows="6"
+                                placeholder="追加到内置 system prompt 后面的自定义提示。"
+                            ></textarea>
+                            <div class="settings-button-row" style="margin-top: 8px">
+                                <button
+                                    class="settings-btn settings-btn-primary"
+                                    id="sd-save-system-prompt"
+                                    type="button"
+                                >
+                                    保存
+                                </button>
+                                <button
+                                    class="settings-btn"
+                                    id="sd-reset-system-prompt"
+                                    type="button"
+                                >
+                                    恢复默认
                                 </button>
                             </div>
                         </div>
@@ -176,6 +218,24 @@
 
                 <footer class="composer-shell glass-panel">
                     <div class="suggestion-row">
+                        <div
+                            id="selection-focus-row"
+                            class="selection-focus-row is-hidden"
+                        >
+                            <button
+                                id="selection-focus-chip"
+                                class="selection-focus-chip"
+                                type="button"
+                                data-active="true"
+                            ></button>
+                            <button
+                                id="selection-explain-button"
+                                class="selection-explain-button"
+                                type="button"
+                            >
+                                解释选中文字
+                            </button>
+                        </div>
                         <button
                             class="suggestion-pill"
                             type="button"
@@ -200,7 +260,32 @@
                     </div>
 
                     <div class="composer-card">
-                        <div id="context-url" class="context-url"></div>
+                        <div class="context-header-row">
+                            <div id="context-url" class="context-url"></div>
+                            <div
+                                id="context-selection-indicator"
+                                class="context-selection-indicator is-hidden"
+                            >
+                                selected text
+                            </div>
+                        </div>
+                        <div
+                            id="composer-divider"
+                            class="composer-divider"
+                            aria-hidden="true"
+                        ></div>
+                        <div
+                            id="selection-debug-box"
+                            class="selection-debug-box is-hidden"
+                        >
+                            <div class="selection-debug-title">
+                                selection debug
+                            </div>
+                            <pre
+                                id="selection-debug-content"
+                                class="selection-debug-content"
+                            ></pre>
+                        </div>
                         <textarea
                             id="question-editor"
                             rows="1"
@@ -208,7 +293,7 @@
                         ></textarea>
                         <div class="composer-footer">
                             <div class="composer-left">
-                                <div class="status-chip">
+                                <div id="status-chip" class="status-chip">
                                     <span id="conversation-status"></span>
                                 </div>
                             </div>
@@ -277,6 +362,7 @@
                                     class="icon-button icon-button-primary"
                                     type="button"
                                     aria-label="发送"
+                                    data-mode="send"
                                 >
                                     <svg
                                         width="14"

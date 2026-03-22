@@ -12,6 +12,10 @@ import {
 
 let activeWriteTarget = null;
 let lastKnownURL = window.location.href;
+let interactiveTargetIndex = new Map();
+let latestInteractiveTargets = [];
+let lastStableSelection = "";
+let lastStableSelectionURL = window.location.href;
 
 patchHistoryMethods();
 
@@ -25,9 +29,31 @@ browser.runtime.onMessage.addListener((message) => {
       return handlePrepareFocusedInput();
     case "content:apply-draft":
       return handleApplyDraft(message.payload?.draft);
+    case "content:highlight-target":
+      return handleInteractiveTargetCommand("highlight", message.payload);
+    case "content:focus-target":
+      return handleInteractiveTargetCommand("focus", message.payload);
+    case "content:scroll-to-target":
+      return handleInteractiveTargetCommand("scroll", message.payload);
     default:
       return undefined;
   }
+});
+
+document.addEventListener("selectionchange", () => {
+  rememberCurrentSelection();
+  syncStableSelection();
+  queueContextSync();
+});
+
+document.addEventListener("mouseup", () => {
+  rememberCurrentSelection();
+  syncStableSelection();
+});
+
+document.addEventListener("keyup", () => {
+  rememberCurrentSelection();
+  syncStableSelection();
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -55,15 +81,18 @@ document.addEventListener("yt-navigate-finish", () => {
 setInterval(() => {
   if (window.location.href !== lastKnownURL) {
     lastKnownURL = window.location.href;
+    lastStableSelection = "";
+    lastStableSelectionURL = window.location.href;
     queueContextSync();
   }
 }, 1000);
 
 function handleGetPageContext() {
   try {
+    const context = extractContextSnapshot();
     return Promise.resolve(
       createSuccessResponse({
-        context: extractPageContext(window, document),
+        context,
       })
     );
   } catch (error) {
@@ -74,7 +103,7 @@ function handleGetPageContext() {
 }
 
 function handlePrepareFocusedInput() {
-  const pageContext = extractPageContext(window, document);
+  const pageContext = extractContextSnapshot();
   const target = resolveWritableTarget(document, document.activeElement, {
     site: pageContext.site,
     ...pageContext.metadata,
@@ -96,7 +125,7 @@ function handlePrepareFocusedInput() {
 }
 
 function handleApplyDraft(draft) {
-  const pageContext = extractPageContext(window, document);
+  const pageContext = extractContextSnapshot();
   const target = resolveWritableTarget(
     document,
     activeWriteTarget && document.contains(activeWriteTarget)
@@ -149,10 +178,45 @@ function handleApplyDraft(draft) {
   activeWriteTarget = target;
 
   return Promise.resolve(
+      createSuccessResponse({
+        mode: "page",
+        answer: "草稿已写入页面，未自动提交。",
+        target: describeWriteTarget(target, extractContextSnapshot().metadata),
+      })
+  );
+}
+
+function handleInteractiveTargetCommand(action, payload = {}) {
+  const target = resolveInteractiveTarget(payload.targetId, payload.selectorHint);
+  if (!target) {
+    return Promise.resolve(
+      createErrorResponse("target_not_found", "目标元素不存在或已失效")
+    );
+  }
+
+  if (action === "highlight") {
+    highlightElement(target);
+  } else if (action === "focus") {
+    target.focus?.();
+    highlightElement(target);
+  } else if (action === "scroll") {
+    target.scrollIntoView?.({
+      block: "center",
+      inline: "nearest",
+      behavior: "smooth",
+    });
+    highlightElement(target);
+  }
+
+  return Promise.resolve(
     createSuccessResponse({
-      mode: "page",
-      answer: "草稿已写入页面，未自动提交。",
-      target: describeWriteTarget(target, extractPageContext(window, document).metadata),
+      target: {
+        id: payload.targetId || "",
+        description:
+          payload.label ||
+          describeWriteTarget(target, extractContextSnapshot().metadata)?.description ||
+          "",
+      },
     })
   );
 }
@@ -161,7 +225,7 @@ function queueContextSync() {
   setTimeout(() => {
     try {
       lastKnownURL = window.location.href;
-      const context = extractPageContext(window, document);
+      const context = extractContextSnapshot();
       browser.runtime.sendMessage({
         type: "content:page-updated",
         payload: { context },
@@ -170,6 +234,21 @@ function queueContextSync() {
       // Ignore transient DOM read failures during page bootstrap.
     }
   }, 0);
+}
+
+function syncStableSelection() {
+  const selection = String(lastStableSelection || "").trim();
+  if (!selection) {
+    return;
+  }
+
+  browser.runtime.sendMessage({
+    type: "content:selection-updated",
+    payload: {
+      url: window.location.href,
+      selection,
+    },
+  }).catch(() => {});
 }
 
 function patchHistoryMethods() {
@@ -188,4 +267,86 @@ function patchHistoryMethods() {
 
   wrap("pushState");
   wrap("replaceState");
+}
+
+function extractContextSnapshot() {
+  const context = extractPageContext(window, document);
+  const liveSelection = String(window.getSelection?.()?.toString?.() ?? "").trim();
+  const selection = String(context.selection || "").trim();
+  if (selection) {
+    lastStableSelection = selection;
+    lastStableSelectionURL = window.location.href;
+  } else if (
+    lastStableSelection &&
+    lastStableSelectionURL === window.location.href
+  ) {
+    context.selection = lastStableSelection;
+  } else if (lastStableSelectionURL !== window.location.href) {
+    lastStableSelection = "";
+    lastStableSelectionURL = window.location.href;
+  }
+  interactiveTargetIndex = context.__interactiveTargetIndex ?? new Map();
+  latestInteractiveTargets = Array.isArray(context.interactiveTargets)
+    ? context.interactiveTargets
+    : [];
+  context.debugSelection = {
+    contentLiveSelection: truncateDebugValue(liveSelection),
+    contentStableSelection: truncateDebugValue(lastStableSelection),
+    contentSelectionURL: truncateDebugValue(lastStableSelectionURL),
+  };
+  return context;
+}
+
+function rememberCurrentSelection() {
+  const selection = String(window.getSelection?.()?.toString?.() ?? "").trim();
+  if (!selection) {
+    return;
+  }
+
+  lastStableSelection = selection;
+  lastStableSelectionURL = window.location.href;
+}
+
+function truncateDebugValue(value) {
+  const text = String(value || "").trim();
+  if (text.length <= 160) {
+    return text;
+  }
+  return `${text.slice(0, 157)}...`;
+}
+
+function resolveInteractiveTarget(targetId, selectorHint) {
+  if (targetId) {
+    const direct = interactiveTargetIndex.get(targetId);
+    if (direct && document.contains(direct)) {
+      return direct;
+    }
+
+    const knownTarget = latestInteractiveTargets.find((item) => item.id === targetId);
+    if (knownTarget?.selectorHint) {
+      const resolved = queryInteractiveSelector(knownTarget.selectorHint);
+      if (resolved) {
+        interactiveTargetIndex.set(targetId, resolved);
+        return resolved;
+      }
+    }
+  }
+
+  if (selectorHint) {
+    return queryInteractiveSelector(selectorHint);
+  }
+
+  return null;
+}
+
+function queryInteractiveSelector(selectorHint) {
+  if (!selectorHint) {
+    return null;
+  }
+
+  try {
+    return document.querySelector(selectorHint);
+  } catch {
+    return null;
+  }
 }

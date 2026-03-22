@@ -12,7 +12,10 @@ struct PanelContextSnapshot: Codable {
     var title: String
     var selection: String
     var articleText: String
+    var structureSummary: String?
+    var interactiveSummary: String?
     var metadata: [String: String]
+    var debugSelection: [String: String]?
     var visualSummary: String?
 }
 
@@ -23,8 +26,15 @@ struct PanelStateSnapshot: Codable {
     var updatedAt: TimeInterval
 }
 
+struct SelectionIntentSnapshot: Codable {
+    var url: String
+    var selection: String
+    var updatedAt: TimeInterval
+}
+
 enum PanelStateStore {
     private static let stateURL = SharedContainer.baseURL().appendingPathComponent("panel-state.json")
+    private static let selectionIntentURL = SharedContainer.baseURL().appendingPathComponent("selection-intent.json")
 
     static func load() -> PanelStateSnapshot? {
         guard
@@ -54,5 +64,29 @@ enum PanelStateStore {
             updatedAt: Date().timeIntervalSince1970
         )
         try? save(snapshot)
+    }
+
+    static func loadSelectionIntent(matchingURL url: String?) -> SelectionIntentSnapshot? {
+        guard
+            let data = try? Data(contentsOf: selectionIntentURL),
+            let value = try? JSONDecoder().decode(SelectionIntentSnapshot.self, from: data)
+        else {
+            return nil
+        }
+
+        let now = Date().timeIntervalSince1970
+        guard now - value.updatedAt <= 120 else {
+            return nil
+        }
+
+        guard !value.selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        if let url, !url.isEmpty, value.url == url {
+            return value
+        }
+
+        return value
     }
 }

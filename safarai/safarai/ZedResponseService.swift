@@ -64,7 +64,8 @@ final class ZedResponseService {
     func streamQuestion(
         prompt: String,
         context: PanelContextSnapshot?,
-        history: [PanelConversationMessage]
+        history: [PanelConversationMessage],
+        selectedFocus: String = ""
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -78,6 +79,7 @@ final class ZedResponseService {
                         prompt: prompt,
                         context: context,
                         history: history,
+                        selectedFocus: selectedFocus,
                         model: model,
                         configuration: configuration,
                         llmToken: llmToken,
@@ -211,14 +213,17 @@ final class ZedResponseService {
         prompt: String,
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
+        selectedFocus: String,
         model: ZedModelSummary,
         configuration: ZedAccountConfiguration,
         llmToken: String,
         retryOnExpiry: Bool,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
-        let systemPrompt = "你是集成在 Safari 页面里的中文助理。回答必须简洁、准确、面向当前页面任务，不要编造页面中不存在的信息。若有页面选中内容，请优先解释选中内容，再结合整页内容回答。"
-        let finalPrompt = buildPrompt(prompt: prompt, context: context, history: history)
+        let systemPrompt = appendCustomSystemPrompt(
+            basePrompt: "你是集成在 Safari 页面里的中文助理。回答必须简洁、准确、面向当前页面任务，不要编造页面中不存在的信息。若有页面选中内容，请优先解释选中内容，再结合整页内容回答。"
+        )
+        let finalPrompt = buildPrompt(prompt: prompt, context: context, history: history, selectedFocus: selectedFocus)
 
         let bodyDict: [String: Any] = [
             "provider": model.provider,
@@ -251,6 +256,7 @@ final class ZedResponseService {
                 prompt: prompt,
                 context: context,
                 history: history,
+                selectedFocus: selectedFocus,
                 model: model,
                 configuration: configuration,
                 llmToken: freshToken,
@@ -340,7 +346,8 @@ final class ZedResponseService {
     private func buildPrompt(
         prompt: String,
         context: PanelContextSnapshot?,
-        history: [PanelConversationMessage]
+        history: [PanelConversationMessage],
+        selectedFocus: String
     ) -> String {
         var sections = [String]()
 
@@ -348,12 +355,19 @@ final class ZedResponseService {
             sections.append("site: \(context.site)")
             sections.append("title: \(context.title)")
             if !context.url.isEmpty { sections.append("url: \(context.url)") }
-            if !context.selection.isEmpty { sections.append("selected_focus: \(context.selection)") }
+            if !context.selection.isEmpty { sections.append("selection: \(context.selection)") }
+            if !selectedFocus.isEmpty { sections.append("selected_focus: \(selectedFocus)") }
             if let pageKind = context.metadata["pageKind"], !pageKind.isEmpty {
                 sections.append("page_kind: \(pageKind)")
             }
             if let visualSummary = context.visualSummary, !visualSummary.isEmpty {
                 sections.append("visual_summary:\n\(visualSummary)")
+            }
+            if let structureSummary = context.structureSummary, !structureSummary.isEmpty {
+                sections.append("structure_summary:\n\(structureSummary)")
+            }
+            if let interactiveSummary = context.interactiveSummary, !interactiveSummary.isEmpty {
+                sections.append("interactive_summary:\n\(interactiveSummary)")
             }
             if !context.articleText.isEmpty {
                 sections.append("article_text:\n\(context.articleText)")

@@ -2,17 +2,31 @@ import Foundation
 
 enum PanelStateWriter {
     private static let stateURL = NativeSharedContainer.baseURL().appendingPathComponent("panel-state.json")
+    private static let selectionIntentURL = NativeSharedContainer.baseURL().appendingPathComponent("selection-intent.json")
 
     static func save(payload: [String: Any], status: String? = nil) throws {
+        let current = loadRawSnapshot() ?? [:]
         let context = payload["context"] as? [String: Any]
-        let session = payload["messages"] as? [[String: Any]] ?? []
+        let normalizedIncomingContext = preserveSelection(
+            currentContext: current["context"] as? [String: Any],
+            incomingContext: normalizeContext(context)
+        )
+        let incomingMessages = (payload["messages"] as? [[String: Any]] ?? []).map(normalizeMessage(_:))
+        let preservedMessages = preserveMessages(
+            current: current["messages"] as? [[String: Any]] ?? [],
+            incoming: incomingMessages,
+            currentContext: current["context"] as? [String: Any],
+            incomingContext: normalizedIncomingContext
+        )
 
         let snapshot: [String: Any] = [
-            "context": normalizeContext(context) as Any,
-            "messages": session.map(normalizeMessage(_:)),
+            "context": normalizedIncomingContext as Any,
+            "messages": preservedMessages,
             "status": status as Any,
             "updatedAt": Date().timeIntervalSince1970,
         ]
+
+        persistSelectionIntent(from: normalizedIncomingContext)
 
         let directory = stateURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -39,12 +53,35 @@ enum PanelStateWriter {
         try data.write(to: stateURL, options: .atomic)
     }
 
+    static func saveSelectionIntent(url: String, selection: String) {
+        let normalizedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSelection = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedURL.isEmpty, !normalizedSelection.isEmpty else {
+            return
+        }
+
+        let payload: [String: Any] = [
+            "url": normalizedURL,
+            "selection": normalizedSelection,
+            "updatedAt": Date().timeIntervalSince1970,
+        ]
+
+        let directory = selectionIntentURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: selectionIntentURL, options: .atomic)
+        }
+    }
+
     private static func normalizeContext(_ context: [String: Any]?) -> [String: Any]? {
         guard let context else {
             return nil
         }
 
         let metadata = (context["metadata"] as? [String: Any] ?? [:]).reduce(into: [String: String]()) { result, item in
+            result[item.key] = String(describing: item.value)
+        }
+        let debugSelection = (context["debugSelection"] as? [String: Any] ?? [:]).reduce(into: [String: String]()) { result, item in
             result[item.key] = String(describing: item.value)
         }
 
@@ -54,7 +91,10 @@ enum PanelStateWriter {
             "title": String(describing: context["title"] ?? "当前页面"),
             "selection": String(describing: context["selection"] ?? ""),
             "articleText": String(describing: context["articleText"] ?? ""),
+            "structureSummary": context["structureSummary"] ?? NSNull(),
+            "interactiveSummary": context["interactiveSummary"] ?? NSNull(),
             "metadata": metadata,
+            "debugSelection": debugSelection,
             "visualSummary": buildVisualSummary(context, metadata: metadata) as Any,
         ]
     }
@@ -65,6 +105,54 @@ enum PanelStateWriter {
             "kind": String(describing: item["kind"] ?? "message"),
             "text": String(describing: item["text"] ?? ""),
         ]
+    }
+
+    private static func preserveMessages(
+        current: [[String: Any]],
+        incoming: [[String: String]],
+        currentContext: [String: Any]?,
+        incomingContext: [String: Any]?
+    ) -> [[String: Any]] {
+        let currentURL = String(describing: currentContext?["url"] ?? "")
+        let incomingURL = String(describing: incomingContext?["url"] ?? "")
+
+        if incoming.isEmpty {
+            return current
+        }
+
+        if current.isEmpty {
+            return incoming.map { $0 }
+        }
+
+        if !currentURL.isEmpty, !incomingURL.isEmpty, currentURL != incomingURL {
+            return incoming.map { $0 }
+        }
+
+        if incoming.count >= current.count {
+            return incoming.map { $0 }
+        }
+
+        return current
+    }
+
+    private static func preserveSelection(
+        currentContext: [String: Any]?,
+        incomingContext: [String: Any]?
+    ) -> [String: Any]? {
+        guard var incomingContext else {
+            return nil
+        }
+
+        let currentURL = String(describing: currentContext?["url"] ?? "")
+        let incomingURL = String(describing: incomingContext["url"] ?? "")
+        let currentSelection = String(describing: currentContext?["selection"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingSelection = String(describing: incomingContext["selection"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if incomingSelection.isEmpty, !currentSelection.isEmpty, currentURL == incomingURL {
+            incomingContext["selection"] = currentSelection
+        }
+
+        return incomingContext
     }
 
     private static func buildVisualSummary(_ context: [String: Any], metadata: [String: String]) -> String {
@@ -92,5 +180,23 @@ enum PanelStateWriter {
             return nil
         }
         return payload
+    }
+
+    private static func persistSelectionIntent(from context: [String: Any]?) {
+        guard
+            let context,
+            let url = context["url"] as? String,
+            !url.isEmpty
+        else {
+            return
+        }
+
+        let selection = String(describing: context["selection"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selection.isEmpty else {
+            return
+        }
+
+        saveSelectionIntent(url: url, selection: selection)
     }
 }

@@ -27,6 +27,13 @@ test("GitHub PR 页面优先提取 markdown-body 并识别仓库", () => {
       "aria-label": "Comment",
     },
   });
+  const activeTab = createNode({ tagName: "A", textContent: "Conversation" });
+  const statePill = createNode({ tagName: "SPAN", textContent: "Open" });
+  const reviewButton = createNode({
+    tagName: "BUTTON",
+    textContent: "Review changes",
+    rect: { top: 24, left: 320, width: 140, height: 32, right: 460, bottom: 56 },
+  });
 
   const doc = createDocument({
     title: "Improve sidebar extraction",
@@ -34,8 +41,13 @@ test("GitHub PR 页面优先提取 markdown-body 并识别仓库", () => {
     selectors: {
       ".markdown-body": markdownNode,
       "main": fallbackMain,
+      ".UnderlineNav-item.selected": activeTab,
       "textarea[placeholder*='comment'], textarea[aria-label*='comment'], [contenteditable='true']":
         textarea,
+    },
+    selectorAll: {
+      ".State": [statePill],
+      "main button": [reviewButton],
     },
   });
 
@@ -60,7 +72,13 @@ test("GitHub PR 页面优先提取 markdown-body 并识别仓库", () => {
   assert.equal(result.metadata.pageKind, "github_pull_request");
   assert.equal(result.metadata.repository, "ink1ing/safarai");
   assert.equal(result.metadata.hasCommentEditor, true);
+  assert.equal(result.metadata.mainTab, "Conversation");
+  assert.equal(result.metadata.statePills, "Open");
+  assert.equal(result.metadata.primaryActions, "Review changes");
   assert.match(result.articleText, /^Pull request summary/);
+  assert.match(result.structureSummary, /repository=ink1ing\/safarai/);
+  assert.match(result.structureSummary, /tab=Conversation/);
+  assert.match(result.structureSummary, /actions=Review changes/);
   assert.equal(result.focusedInput.label, "Comment");
 });
 
@@ -266,11 +284,175 @@ test("Yahoo Mail 会识别邮件正文和编辑器", () => {
   assert.match(result.articleText, /^Yahoo mail content/);
 });
 
-function createDocument({ title, activeElement = null, selectors = {}, selectorAll = {} }) {
+test("DOM context v2 会跳过隐藏导航并产出结构与交互摘要", () => {
+  const titleNode = createNode({
+    tagName: "H1",
+    textContent: "Guide to shipping a Safari AI sidebar",
+  });
+  const paragraphOne = createNode({
+    tagName: "P",
+    textContent: "This guide explains how to build a stable Safari AI sidebar with DOM-first extraction.",
+  });
+  const paragraphTwo = createNode({
+    tagName: "P",
+    textContent: "It covers candidate roots, visible block scoring, prompt shaping, and safe interaction design.",
+  });
+  const list = createNode({
+    tagName: "UL",
+    children: [
+      createNode({ tagName: "LI", textContent: "Root selection" }),
+      createNode({ tagName: "LI", textContent: "Visible block filtering" }),
+    ],
+  });
+  const table = createNode({
+    tagName: "TABLE",
+    children: [
+      createNode({ tagName: "TR", children: [createNode({ tagName: "TD", textContent: "GitHub" })] }),
+    ],
+  });
+  const code = createNode({
+    tagName: "PRE",
+    textContent: "const context = extractPageContext(window, document);",
+  });
+  const visibleButton = createNode({
+    tagName: "BUTTON",
+    textContent: "Open settings",
+    rect: { top: 80, left: 40, width: 120, height: 30, right: 160, bottom: 110 },
+  });
+  const visibleLink = createNode({
+    tagName: "A",
+    textContent: "Read docs",
+    attrs: { href: "https://example.com/docs" },
+    rect: { top: 140, left: 40, width: 90, height: 24, right: 130, bottom: 164 },
+  });
+  const iframeNode = createNode({ tagName: "IFRAME", attrs: { src: "https://example.com/embed" } });
+  const shadowHost = createNode({
+    tagName: "DIV",
+    textContent: "Shadow host",
+    shadowRoot: {},
+  });
+  const main = createNode({
+    tagName: "MAIN",
+    children: [
+      titleNode,
+      paragraphOne,
+      paragraphTwo,
+      list,
+      table,
+      code,
+      visibleButton,
+      visibleLink,
+      iframeNode,
+      shadowHost,
+    ],
+  });
+  const hiddenNav = createNode({
+    tagName: "NAV",
+    textContent: "Pricing Docs Changelog",
+    computedStyle: { display: "block", visibility: "visible", opacity: "1" },
+  });
+  const body = createNode({
+    tagName: "BODY",
+    children: [hiddenNav, main],
+  });
+
+  const doc = createDocument({
+    title: "Safari Sidebar Guide",
+    body,
+    selectors: {
+      main,
+      body,
+    },
+  });
+
+  const win = createWindow({
+    href: "https://docs.example.com/guide/sidebar",
+    hostname: "docs.example.com",
+    pathname: "/guide/sidebar",
+  });
+
+  const result = extractPageContext(win, doc);
+
+  assert.equal(result.metadata.contentStrategy, "generic_main");
+  assert.equal(result.metadata.tableCount, "1");
+  assert.equal(result.metadata.codeBlockCount, "1");
+  assert.equal(result.metadata.hasIframes, "true");
+  assert.equal(result.metadata.hasShadowHosts, "true");
+  assert.match(result.articleText, /Guide to shipping a Safari AI sidebar/);
+  assert.doesNotMatch(result.articleText, /Pricing Docs Changelog/);
+  assert.match(result.structureSummary, /block_counts: headings=1, paragraphs=2, lists=1, tables=1, code_blocks=1/);
+  assert.match(result.interactiveSummary, /label=Open settings/);
+  assert.match(result.interactiveSummary, /label=Read docs/);
+  assert.equal(Array.isArray(result.interactiveTargets), true);
+  assert.equal(result.interactiveTargets.length, 2);
+  assert.equal(result.interactiveTargets[0].id, "target_1");
+  assert.equal(
+    result.interactiveTargets[0].selectorHint,
+    "body > main:nth-of-type(1) > button:nth-of-type(1)"
+  );
+  assert.deepEqual(result.interactiveTargets[0].rect, {
+    top: 80,
+    left: 40,
+    width: 120,
+    height: 30,
+  });
+});
+
+test("interactiveSummary 会按页面位置稳定排序并过滤隐藏元素", () => {
+  const hiddenButton = createNode({
+    tagName: "BUTTON",
+    textContent: "Hidden action",
+    computedStyle: { display: "none", visibility: "visible", opacity: "1" },
+    rect: { top: 20, left: 20, width: 120, height: 32, right: 140, bottom: 52 },
+  });
+  const firstButton = createNode({
+    tagName: "BUTTON",
+    textContent: "First visible",
+    rect: { top: 40, left: 60, width: 120, height: 32, right: 180, bottom: 72 },
+  });
+  const secondButton = createNode({
+    tagName: "BUTTON",
+    textContent: "Second visible",
+    rect: { top: 120, left: 60, width: 120, height: 32, right: 180, bottom: 152 },
+  });
+  const body = createNode({
+    tagName: "BODY",
+    children: [
+      createNode({ tagName: "MAIN", textContent: "Useful content ".repeat(20) }),
+      hiddenButton,
+      secondButton,
+      firstButton,
+    ],
+  });
+
+  const doc = createDocument({
+    title: "Interactive ordering",
+    body,
+    selectors: {
+      main: body.children[0],
+      body,
+    },
+  });
+
+  const win = createWindow({
+    href: "https://example.com/app",
+    hostname: "example.com",
+    pathname: "/app",
+  });
+
+  const result = extractPageContext(win, doc);
+  const lines = result.interactiveSummary.split("\n");
+
+  assert.match(lines[0], /First visible/);
+  assert.match(lines[1], /Second visible/);
+  assert.equal(result.interactiveSummary.includes("Hidden action"), false);
+});
+
+function createDocument({ title, activeElement = null, body = null, selectors = {}, selectorAll = {} }) {
   return {
     title,
     activeElement,
-    body: selectors.body ?? null,
+    body: body ?? selectors.body ?? null,
     querySelector(selector) {
       return selectors[selector] ?? null;
     },
@@ -280,15 +462,73 @@ function createDocument({ title, activeElement = null, selectors = {}, selectorA
   };
 }
 
-function createNode({ tagName = "DIV", textContent = "", attrs = {}, contentEditable = "inherit" }) {
-  return {
+function createNode({
+  tagName = "DIV",
+  textContent,
+  attrs = {},
+  contentEditable = "inherit",
+  children = [],
+  computedStyle = { display: "block", visibility: "visible", opacity: "1" },
+  rect = { top: 0, left: 0, width: 120, height: 32, right: 120, bottom: 32 },
+  type = "text",
+  disabled = false,
+  readOnly = false,
+  shadowRoot = null,
+}) {
+  const derivedText =
+    textContent ??
+    children
+      .map((child) => child.textContent ?? child.innerText ?? "")
+      .join(" ")
+      .trim();
+
+  const node = {
     tagName,
-    textContent,
-    innerText: textContent,
+    type,
+    disabled,
+    readOnly,
+    textContent: derivedText,
+    innerText: derivedText,
     contentEditable,
     isContentEditable: contentEditable === "true",
+    children,
+    childNodes: children,
+    computedStyle,
+    rect,
+    shadowRoot,
     getAttribute(key) {
       return attrs[key] ?? null;
+    },
+    getBoundingClientRect() {
+      return rect;
+    },
+  };
+
+  for (const child of children) {
+    child.parentElement = node;
+  }
+
+  return node;
+}
+
+function createWindow({ href, hostname, pathname, selection = "" }) {
+  return {
+    location: { href, hostname, pathname },
+    innerWidth: 1440,
+    innerHeight: 900,
+    getSelection() {
+      return {
+        toString() {
+          return selection;
+        },
+      };
+    },
+    getComputedStyle(node) {
+      return node.computedStyle || {
+        display: "block",
+        visibility: "visible",
+        opacity: "1",
+      };
     },
   };
 }

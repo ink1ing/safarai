@@ -3,12 +3,64 @@ const modelDisplay = document.getElementById("model-display");
 const conversationList = document.getElementById("conversation-list");
 const conversationStatus = document.getElementById("conversation-status");
 const contextURL = document.getElementById("context-url");
+const contextSelectionIndicator = document.getElementById(
+  "context-selection-indicator",
+);
+const composerDivider = document.getElementById("composer-divider");
+const selectionDebugBox = document.getElementById("selection-debug-box");
+const selectionDebugContent = document.getElementById("selection-debug-content");
+const selectionFocusRow = document.getElementById("selection-focus-row");
+const selectionFocusChip = document.getElementById("selection-focus-chip");
+const selectionExplainButton = document.getElementById("selection-explain-button");
 const questionEditor = document.getElementById("question-editor");
 const askPageButton = document.getElementById("ask-page");
 const refreshContextButton = document.getElementById("refresh-context-button");
 const settingsButton = document.getElementById("settings-button");
 const settingsCloseButton = document.getElementById("settings-close-button");
+const systemPromptEditor = document.getElementById("sd-system-prompt-editor");
+const saveSystemPromptButton = document.getElementById("sd-save-system-prompt");
+const resetSystemPromptButton = document.getElementById("sd-reset-system-prompt");
+const statusChip = document.getElementById("status-chip");
 const contextPreviewURL = document.getElementById("context-preview-url");
+let isStreamingResponse = false;
+let currentDrawerState = {
+  theme: "blue",
+  showPageInfo: true,
+  showStatusInfo: true,
+  customSystemPrompt: "",
+};
+let currentContext = null;
+let selectionFocusSignature = "";
+let selectionFocusEnabled = false;
+let systemPromptSavedValue = "";
+let systemPromptDirty = false;
+
+const SEND_ICON = `
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M22 2 11 13" />
+    <path d="M22 2 15 22 11 13 2 9 22 2z" />
+  </svg>
+`;
+
+const STOP_ICON = `
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+  >
+    <rect x="6" y="6" width="12" height="12" rx="2.5" />
+  </svg>
+`;
 
 modelSelect.addEventListener("change", () => {
   syncSelectedModelDisplay();
@@ -29,6 +81,34 @@ refreshContextButton.addEventListener("click", () => {
     command: "refresh-panel-context",
   });
 });
+selectionFocusChip.addEventListener("click", () => {
+  if (!selectionFocusSignature) {
+    return;
+  }
+  selectionFocusEnabled = !selectionFocusEnabled;
+  renderSelectionFocus();
+});
+selectionExplainButton.addEventListener("click", () => {
+  const selectedFocus = getCurrentSelectionText();
+  if (!selectedFocus) {
+    return;
+  }
+  sendQuestion("请结合整个页面背景，着重解释当前选中的内容。", {
+    selectedFocus,
+  });
+});
+systemPromptEditor.addEventListener("input", () => {
+  systemPromptDirty = normalizeSystemPrompt(systemPromptEditor.value) !== systemPromptSavedValue;
+  syncSystemPromptButtons();
+});
+saveSystemPromptButton.addEventListener("click", () => {
+  sdPost("save-custom-system-prompt", {
+    customSystemPrompt: systemPromptEditor.value,
+  });
+});
+resetSystemPromptButton.addEventListener("click", () => {
+  sdPost("reset-custom-system-prompt");
+});
 
 for (const pill of document.querySelectorAll(".suggestion-pill[data-prompt]")) {
   pill.addEventListener("click", () => {
@@ -39,24 +119,42 @@ for (const pill of document.querySelectorAll(".suggestion-pill[data-prompt]")) {
   });
 }
 
-askPageButton.addEventListener("click", () => sendQuestion());
+askPageButton.addEventListener("click", () => {
+  if (isStreamingResponse) {
+    stopCurrentResponse();
+    return;
+  }
+  sendQuestion();
+});
 questionEditor.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    if (isStreamingResponse) {
+      stopCurrentResponse();
+      return;
+    }
     sendQuestion();
   }
 });
 
-function sendQuestion(directPrompt) {
+function sendQuestion(directPrompt, options = {}) {
   const prompt = directPrompt || questionEditor.value.trim();
   if (!prompt) {
     return;
   }
 
   questionEditor.value = "";
+  const selectedFocus = resolveSelectedFocus(options);
   webkit.messageHandlers.controller.postMessage({
     command: "send-question",
     prompt,
+    selectedFocus,
+  });
+}
+
+function stopCurrentResponse() {
+  webkit.messageHandlers.controller.postMessage({
+    command: "stop-response",
   });
 }
 
@@ -113,6 +211,24 @@ function sdSavePlacementMode(mode) {
   sdPost("save-placement-mode-settings", { placementMode: mode });
 }
 
+function sdSaveTheme(theme) {
+  sdPost("save-theme-settings", { theme });
+}
+
+function sdTogglePageInfo() {
+  sdPost("save-panel-visibility-settings", {
+    showPageInfo: !currentDrawerState.showPageInfo,
+    showStatusInfo: currentDrawerState.showStatusInfo,
+  });
+}
+
+function sdToggleStatusInfo() {
+  sdPost("save-panel-visibility-settings", {
+    showPageInfo: currentDrawerState.showPageInfo,
+    showStatusInfo: !currentDrawerState.showStatusInfo,
+  });
+}
+
 document
   .getElementById("sd-login-codex")
   .addEventListener("click", () => sdPost("start-codex-login"));
@@ -134,6 +250,30 @@ document
 document
   .getElementById("sd-placement-right")
   .addEventListener("click", () => sdSavePlacementMode("right"));
+document
+  .getElementById("sd-theme-blue")
+  .addEventListener("click", () => sdSaveTheme("blue"));
+document
+  .getElementById("sd-theme-orange")
+  .addEventListener("click", () => sdSaveTheme("orange"));
+document
+  .getElementById("sd-theme-gray")
+  .addEventListener("click", () => sdSaveTheme("gray"));
+document
+  .getElementById("sd-theme-purple")
+  .addEventListener("click", () => sdSaveTheme("purple"));
+document
+  .getElementById("sd-theme-green")
+  .addEventListener("click", () => sdSaveTheme("green"));
+document
+  .getElementById("sd-toggle-page-info")
+  .addEventListener("click", () => sdTogglePageInfo());
+document
+  .getElementById("sd-toggle-status-info")
+  .addEventListener("click", () => sdToggleStatusInfo());
+
+syncSystemPromptButtons();
+renderSelectionFocus();
 
 /**
  * Called by Swift (via renderPanelState) to sync drawer UI state.
@@ -142,21 +282,27 @@ document
  */
 function renderSettingsDrawerState(payload) {
   const el = (id) => document.getElementById(id);
-  const anyLoggedIn = !!payload.codexLoggedIn || !!payload.zedLoggedIn;
-
-  el("sd-codex-email").textContent =
-    payload.codexEmail || (anyLoggedIn ? "可连接" : "未登录");
+  currentDrawerState = {
+    theme: payload.theme || "blue",
+    showPageInfo: payload.showPageInfo !== false,
+    showStatusInfo: payload.showStatusInfo !== false,
+    customSystemPrompt: payload.customSystemPrompt || "",
+  };
+  el("sd-codex-email").textContent = payload.codexEmail || "未登录";
   el("sd-login-codex").disabled = !!payload.codexLoggedIn;
   el("sd-logout-codex").disabled = !payload.codexLoggedIn;
 
-  el("sd-zed-name").textContent =
-    payload.zedName || (anyLoggedIn ? "可连接" : "未登录");
+  el("sd-zed-name").textContent = payload.zedName || "未登录";
   el("sd-import-zed").disabled = false;
   el("sd-logout-zed").disabled = !payload.zedLoggedIn;
 
   el("sd-provider-codex").dataset.active =
-    payload.activeProvider === "codex" ? "true" : "false";
+    payload.codexLoggedIn ? "true" : "false";
   el("sd-provider-zed").dataset.active =
+    payload.zedLoggedIn ? "true" : "false";
+  el("sd-provider-codex").dataset.selected =
+    payload.activeProvider === "codex" ? "true" : "false";
+  el("sd-provider-zed").dataset.selected =
     payload.activeProvider === "zed" ? "true" : "false";
 
   el("sd-placement-remember").dataset.active =
@@ -166,7 +312,22 @@ function renderSettingsDrawerState(payload) {
   el("sd-placement-right").dataset.active =
     payload.placementMode === "right" ? "true" : "false";
 
-  el("sd-status").textContent = payload.settingsStatus || "";
+  for (const theme of ["blue", "orange", "gray", "purple", "green"]) {
+    el(`sd-theme-${theme}`).dataset.active =
+      currentDrawerState.theme === theme ? "true" : "false";
+  }
+  el("sd-toggle-page-info").dataset.active =
+    currentDrawerState.showPageInfo ? "true" : "false";
+  el("sd-toggle-status-info").dataset.active =
+    currentDrawerState.showStatusInfo ? "true" : "false";
+
+  el("sd-status").textContent =
+    payload.settingsStatus && payload.settingsStatus !== "Ready"
+      ? payload.settingsStatus
+      : "";
+
+  applyTheme(currentDrawerState.theme);
+  syncSystemPromptEditor(currentDrawerState.customSystemPrompt);
 }
 
 // MARK: - Streaming state
@@ -231,11 +392,16 @@ function renderPanelState(payload) {
   const settings = payload?.settings || {};
   const status = payload?.status || null;
   const context = payload?.context || null;
+  currentContext = context;
+  isStreamingResponse = !!payload?.isStreaming;
 
-  questionEditor.disabled = !settings.isLoggedIn;
+  questionEditor.disabled = !settings.isLoggedIn || isStreamingResponse;
   askPageButton.disabled = !settings.isLoggedIn;
   refreshContextButton.disabled = false;
   settingsButton.disabled = false;
+  selectionExplainButton.disabled = !settings.isLoggedIn;
+  syncAskButton();
+  syncSelectionFocusState(context);
 
   bindModels(
     settings.availableModels || [],
@@ -247,13 +413,141 @@ function renderPanelState(payload) {
   }
   contextURL.textContent = context?.url || "";
   contextPreviewURL.textContent = context?.url || "";
+  contextSelectionIndicator.classList.toggle(
+    "is-hidden",
+    !getCurrentSelectionText(),
+  );
+  renderSelectionDebug(context?.selectionDebug);
   conversationStatus.textContent =
     status || (messages.length ? `${messages.length} 条` : "Ready");
+  applyVisibility(settings);
 
   // Sync settings drawer state if payload carries it
   if (settings.drawerState) {
     renderSettingsDrawerState(settings.drawerState);
   }
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme || "blue";
+}
+
+function applyVisibility(settings) {
+  const showPageInfo = settings.showPageInfo !== false;
+  const showStatusInfo = settings.showStatusInfo !== false;
+
+  contextURL.classList.toggle("is-hidden", !showPageInfo);
+  composerDivider.classList.toggle("is-hidden", !showPageInfo);
+  statusChip.classList.toggle("is-hidden", !showStatusInfo);
+}
+
+function syncAskButton() {
+  askPageButton.dataset.mode = isStreamingResponse ? "stop" : "send";
+  askPageButton.classList.toggle("icon-button-danger", isStreamingResponse);
+  askPageButton.classList.toggle("icon-button-primary", !isStreamingResponse);
+  askPageButton.setAttribute("aria-label", isStreamingResponse ? "终止" : "发送");
+  askPageButton.innerHTML = isStreamingResponse ? STOP_ICON : SEND_ICON;
+}
+
+function syncSelectionFocusState(context) {
+  const signature = buildSelectionSignature(context);
+  if (!signature) {
+    selectionFocusSignature = "";
+    selectionFocusEnabled = false;
+    renderSelectionFocus();
+    return;
+  }
+
+  if (signature !== selectionFocusSignature) {
+    selectionFocusSignature = signature;
+    selectionFocusEnabled = true;
+  }
+
+  renderSelectionFocus();
+}
+
+function renderSelectionFocus() {
+  const selectionText = getCurrentSelectionText();
+  const visible = !!selectionFocusSignature && !!selectionText;
+  selectionFocusRow.classList.toggle("is-hidden", !visible);
+  if (!visible) {
+    selectionFocusChip.textContent = "";
+    selectionFocusChip.dataset.active = "false";
+    return;
+  }
+
+  selectionFocusChip.dataset.active = selectionFocusEnabled ? "true" : "false";
+  selectionFocusChip.textContent = `选中内容焦点 · ${truncate(selectionText, 42)}`;
+}
+
+function buildSelectionSignature(context) {
+  const url = String(context?.url || "").trim();
+  const selection = getCurrentSelectionText();
+  if (!url || !selection) {
+    return "";
+  }
+  return `${url}::${selection}`;
+}
+
+function getCurrentSelectionText() {
+  return String(
+    currentContext?.selectionFocusText || currentContext?.selection || "",
+  ).trim();
+}
+
+function renderSelectionDebug(debugSelection) {
+  const debug = debugSelection || {};
+  const lines = [
+    `contentLiveSelection: ${formatDebugValue(debug.contentLiveSelection)}`,
+    `contentStableSelection: ${formatDebugValue(debug.contentStableSelection)}`,
+    `backgroundPreviousSelection: ${formatDebugValue(debug.backgroundPreviousSelection)}`,
+    `backgroundMergedSelection: ${formatDebugValue(debug.backgroundMergedSelection)}`,
+    `backgroundSelectionMessage: ${formatDebugValue(debug.backgroundSelectionMessage)}`,
+    `backgroundSource: ${formatDebugValue(debug.backgroundSource)}`,
+    `snapshotSelection: ${formatDebugValue(debug.snapshotSelection)}`,
+    `selectionIntent: ${formatDebugValue(debug.selectionIntent)}`,
+    `panelUsedSelection: ${formatDebugValue(getCurrentSelectionText())}`,
+  ];
+
+  selectionDebugContent.textContent = lines.join("\n");
+  selectionDebugBox.classList.remove("is-hidden");
+}
+
+function formatDebugValue(value) {
+  const text = String(value ?? "").trim();
+  return text || "<empty>";
+}
+
+function resolveSelectedFocus(options = {}) {
+  if (typeof options.selectedFocus === "string") {
+    return options.selectedFocus;
+  }
+
+  if (selectionFocusEnabled) {
+    return getCurrentSelectionText();
+  }
+
+  return "";
+}
+
+function syncSystemPromptEditor(value) {
+  const normalizedValue = normalizeSystemPrompt(value);
+  if (!systemPromptDirty || normalizedValue !== systemPromptSavedValue) {
+    systemPromptSavedValue = normalizedValue;
+    systemPromptEditor.value = value || "";
+    systemPromptDirty = false;
+  }
+  syncSystemPromptButtons();
+}
+
+function syncSystemPromptButtons() {
+  saveSystemPromptButton.disabled = !systemPromptDirty;
+  resetSystemPromptButton.disabled =
+    !systemPromptDirty && systemPromptSavedValue.length === 0;
+}
+
+function normalizeSystemPrompt(value) {
+  return String(value || "").trim().slice(0, 4000);
 }
 
 function bindModels(models, selectedModel) {
@@ -422,4 +716,12 @@ function escapeHtml(value) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function truncate(value, limit) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit - 1)}...`;
 }

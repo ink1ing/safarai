@@ -199,7 +199,7 @@ struct LocalProviderClient {
         model: String,
         reasoningEffort: String
     ) -> [String: Any] {
-        let instructions = "你是集成在 Safari 页面里的中文助理。回答必须简洁、准确、面向当前页面任务，不要编造页面中不存在的信息。"
+        let instructions = buildSystemPrompt()
         let prompt = buildPrompt(requestType: requestType, context: context)
 
         return [
@@ -240,6 +240,8 @@ struct LocalProviderClient {
         let repository = (metadata?["repository"] as? String)?.nonEmpty
         let target = ((context["writeTarget"] as? [String: Any])?["description"] as? String)?.nonEmpty
         let userPrompt = (context["userPrompt"] as? String)?.nonEmpty
+        let structureSummary = (context["structureSummary"] as? String)?.nonEmpty
+        let interactiveSummary = (context["interactiveSummary"] as? String)?.nonEmpty
         let history = context["conversationHistory"] as? [[String: Any]] ?? []
 
         var sections = [
@@ -261,6 +263,8 @@ struct LocalProviderClient {
             }.joined(separator: "\n")
             sections.append("recent_conversation:\n\(historyText)")
         }
+        if let structureSummary { sections.append("structure_summary:\n\(structureSummary)") }
+        if let interactiveSummary { sections.append("interactive_summary:\n\(interactiveSummary)") }
         if !article.isEmpty { sections.append("article_text:\n\(article)") }
 
         let header: String
@@ -287,6 +291,20 @@ struct LocalProviderClient {
 
         let promptSection = userPrompt.map { ["user_prompt: \($0)"] } ?? []
         return ([header] + promptSection + sections).joined(separator: "\n\n")
+    }
+
+    private func buildSystemPrompt() -> String {
+        let basePrompt = "你是集成在 Safari 页面里的中文助理。回答必须简洁、准确、面向当前页面任务，不要编造页面中不存在的信息。"
+        guard !config.customSystemPrompt.isEmpty else {
+            return basePrompt
+        }
+
+        return """
+\(basePrompt)
+
+用户附加系统提示:
+\(config.customSystemPrompt)
+"""
     }
 
     private func parseSSEText(_ text: String) throws -> String {

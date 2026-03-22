@@ -35,6 +35,7 @@ struct ProviderConfig {
     let selectedModel: String
     let availableModels: [CodexModelSummaryConfig]
     let reasoningEffort: String
+    let customSystemPrompt: String
 
     var authState: String {
         guard let tokens, !tokens.accessToken.isEmpty else {
@@ -44,7 +45,9 @@ struct ProviderConfig {
     }
 
     static func load() -> ProviderConfig {
-        let reasoningEffort = loadReasoningEffort()
+        let uiSettings = loadUISettings()
+        let reasoningEffort = loadReasoningEffort(uiSettings)
+        let customSystemPrompt = loadCustomSystemPrompt(uiSettings)
         let url = configFileURL()
         guard
             let data = try? Data(contentsOf: url),
@@ -55,7 +58,8 @@ struct ProviderConfig {
                 tokens: nil,
                 selectedModel: "gpt-5",
                 availableModels: [],
-                reasoningEffort: reasoningEffort
+                reasoningEffort: reasoningEffort,
+                customSystemPrompt: customSystemPrompt
             )
         }
 
@@ -64,7 +68,8 @@ struct ProviderConfig {
             tokens: decoded.tokens,
             selectedModel: decoded.model.selected,
             availableModels: decoded.model.available,
-            reasoningEffort: reasoningEffort
+            reasoningEffort: reasoningEffort,
+            customSystemPrompt: customSystemPrompt
         )
     }
 
@@ -89,16 +94,31 @@ struct ProviderConfig {
         NativeSharedContainer.baseURL().appendingPathComponent("codex-account.json")
     }
 
-    private static func loadReasoningEffort() -> String {
+    private static func loadUISettings() -> [String: Any] {
         let url = NativeSharedContainer.baseURL().appendingPathComponent("ui-settings.json")
         guard
             let data = try? Data(contentsOf: url),
-            let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let reasoning = value["reasoning_effort"] as? String,
+            let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return [:]
+        }
+        return value
+    }
+
+    private static func loadReasoningEffort(_ settings: [String: Any]) -> String {
+        guard
+            let reasoning = settings["reasoning_effort"] as? String,
             ["low", "medium", "high"].contains(reasoning)
         else {
             return "medium"
         }
         return reasoning
+    }
+
+    private static func loadCustomSystemPrompt(_ settings: [String: Any]) -> String {
+        String(settings["custom_system_prompt"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix(4000)
+            .description
     }
 }

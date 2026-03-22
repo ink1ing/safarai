@@ -16,12 +16,19 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     @IBOutlet var webView: WKWebView!
 
     private var panelRefreshTimer: Timer?
+    private var responseTask: Task<Void, Never>?
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
         webView.navigationDelegate = self
         webView.configuration.userContentController.add(self, name: "controller")
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAssistantPanelRefresh),
+            name: .assistantPanelShouldRefresh,
+            object: nil
+        )
         webView.loadFileURL(
             Bundle.main.url(forResource: "Panel", withExtension: "html")!,
             allowingReadAccessTo: Bundle.main.resourceURL!
@@ -94,6 +101,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             saveSelectedModel(body)
         case "send-question":
             sendQuestion(body)
+        case "stop-response":
+            stopCurrentResponse()
         case "refresh-panel-context":
             refreshPanelContext()
         case "open-settings-panel":
@@ -106,6 +115,39 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 } catch {
                     pushError(error.localizedDescription)
                 }
+            }
+        case "save-theme-settings":
+            if let theme = body["theme"] as? String {
+                do {
+                    try saveTheme(theme)
+                    pushPanelState(status: "颜色风格已更新。")
+                } catch {
+                    pushError(error.localizedDescription)
+                }
+            }
+        case "save-panel-visibility-settings":
+            do {
+                try savePanelVisibilitySettings(
+                    showPageInfo: body["showPageInfo"] as? Bool,
+                    showStatusInfo: body["showStatusInfo"] as? Bool
+                )
+                pushPanelState(status: "显示选项已更新。")
+            } catch {
+                pushError(error.localizedDescription)
+            }
+        case "save-custom-system-prompt":
+            do {
+                try saveCustomSystemPrompt(body["customSystemPrompt"] as? String)
+                pushPanelState(status: "System prompt 已保存。")
+            } catch {
+                pushError(error.localizedDescription)
+            }
+        case "reset-custom-system-prompt":
+            do {
+                try resetCustomSystemPrompt()
+                pushPanelState(status: "已恢复默认 system prompt。")
+            } catch {
+                pushError(error.localizedDescription)
             }
         case "reset-provider-settings":
             do {
@@ -294,7 +336,14 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func sendQuestion(_ body: [String: Any]) {
+        guard responseTask == nil else {
+            stopCurrentResponse()
+            return
+        }
+
         let prompt = (body["prompt"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let selectedFocus = (body["selectedFocus"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !prompt.isEmpty else {
             pushPanelState(status: "请输入问题。")
@@ -308,32 +357,42 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         snapshot.updatedAt = Date().timeIntervalSince1970
         try? PanelStateStore.save(snapshot)
 
-        pushPanelState(status: "正在回答")
+        pushPanelState(status: "正在回答", snapshot: snapshot)
         evaluateRaw("beginStreamMessage()")
 
         let activeProvider = resolvedActiveProvider()
-        let contextSnapshot = snapshot.context
+        let contextSnapshot: PanelContextSnapshot? = {
+            guard var context = snapshot.context else { return nil }
+            if selectedFocus.isEmpty {
+                context.selection = ""
+            }
+            return context
+        }()
         let historySnapshot = snapshot.messages
 
-        Task {
+        responseTask = Task { [weak self] in
+            guard let self else { return }
+            var accumulated = ""
             do {
                 let stream: AsyncThrowingStream<String, Error>
                 if activeProvider == .zed {
                     stream = ZedResponseService.shared.streamQuestion(
                         prompt: prompt,
                         context: contextSnapshot,
-                        history: historySnapshot
+                        history: historySnapshot,
+                        selectedFocus: selectedFocus
                     )
                 } else {
                     stream = CodexResponseService.shared.streamQuestion(
                         prompt: prompt,
                         context: contextSnapshot,
-                        history: historySnapshot
+                        history: historySnapshot,
+                        selectedFocus: selectedFocus
                     )
                 }
 
-                var accumulated = ""
                 for try await chunk in stream {
+                    try Task.checkCancellation()
                     accumulated += chunk
                     let escaped = chunk
                         .replacingOccurrences(of: "\\", with: "\\\\")
@@ -344,21 +403,33 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     }
                 }
 
-                var next = PanelStateStore.load() ?? snapshot
-                next.messages.append(PanelConversationMessage(role: "assistant", kind: "answer", text: accumulated))
-                next.status = "已回答"
-                next.updatedAt = Date().timeIntervalSince1970
-                try? PanelStateStore.save(next)
                 await MainActor.run {
-                    self.evaluateRaw("finalizeStreamMessage()")
-                    self.pushPanelState(status: "已回答")
+                    self.finishResponse(
+                        baseSnapshot: snapshot,
+                        assistantText: accumulated,
+                        status: "已回答"
+                    )
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self.finishResponse(
+                        baseSnapshot: snapshot,
+                        assistantText: accumulated,
+                        status: "已停止"
+                    )
                 }
             } catch {
                 await MainActor.run {
+                    self.responseTask = nil
                     self.pushError(error.localizedDescription)
                 }
             }
         }
+    }
+
+    private func stopCurrentResponse() {
+        guard let responseTask else { return }
+        responseTask.cancel()
     }
 
     private func refreshPanelContext() {
@@ -374,6 +445,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     title: latest.title,
                     selection: currentContext?.selection ?? "",
                     articleText: currentContext?.articleText ?? latest.title,
+                    structureSummary: currentContext?.structureSummary,
+                    interactiveSummary: currentContext?.interactiveSummary,
                     metadata: currentContext?.metadata ?? [:],
                     visualSummary: currentContext?.visualSummary
                 )
@@ -394,13 +467,23 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
     }
 
-    private func pushPanelState(status: String? = nil, configuration: CodexAccountConfiguration? = nil) {
-        let snapshot = PanelStateStore.load()
+    private func pushPanelState(
+        status: String? = nil,
+        configuration: CodexAccountConfiguration? = nil,
+        snapshot: PanelStateSnapshot? = nil
+    ) {
+        let snapshot = snapshot ?? PanelStateStore.load()
         let codexConfig = configuration ?? CodexAccountStore.load()
         let zedConfig = ZedAccountStore.load()
         let isLoggedIn = codexConfig != nil || zedConfig != nil
         let activeProvider = resolvedActiveProvider(codexConfig: codexConfig, zedConfig: zedConfig)
         let bothLoggedIn = codexConfig != nil && zedConfig != nil
+        let selectionIntent = PanelStateStore.loadSelectionIntent(matchingURL: snapshot?.context?.url)
+        let debugSelection = buildSelectionDebug(
+            snapshotSelection: snapshot?.context?.selection,
+            snapshotDebug: snapshot?.context?.debugSelection,
+            selectionIntent: selectionIntent?.selection
+        )
 
         if isLoggedIn, activeProvider != ProviderSettingsStore.loadActiveProvider() {
             try? ProviderSettingsStore.saveActiveProvider(activeProvider)
@@ -431,6 +514,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "zedLoggedIn": zedConfig != nil,
             "activeProvider": activeProvider.rawValue,
             "placementMode": loadPlacementMode().rawValue,
+            "theme": loadTheme(),
+            "showPageInfo": loadShowPageInfo(),
+            "showStatusInfo": loadShowStatusInfo(),
+            "customSystemPrompt": loadCustomSystemPrompt(),
             "settingsStatus": jsonValue(status ?? snapshot?.status)
         ]
 
@@ -440,6 +527,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "selectedModel": selectedModel,
             "availableModels": availableModels,
             "activeProvider": activeProvider.rawValue,
+            "showPageInfo": loadShowPageInfo(),
+            "showStatusInfo": loadShowStatusInfo(),
             "drawerState": drawerState
         ]
 
@@ -448,13 +537,38 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "context": [
                 "url": jsonValue(snapshot?.context?.url),
                 "title": jsonValue(snapshot?.context?.title),
-                "selection": jsonValue(snapshot?.context?.selection)
+                "selection": jsonValue(snapshot?.context?.selection),
+                "selectionFocusText": jsonValue(selectionIntent?.selection),
+                "selectionDebug": debugSelection
             ],
             "messages": snapshot?.messages.map { ["role": $0.role, "kind": $0.kind, "text": $0.text] } ?? [],
-            "status": jsonValue(status ?? snapshot?.status)
+            "status": jsonValue(status ?? snapshot?.status),
+            "isStreaming": responseTask != nil
         ]
 
         evaluate(function: "renderPanelState", payload: payload)
+    }
+
+    @objc private func handleAssistantPanelRefresh() {
+        pushPanelState()
+    }
+
+    private func finishResponse(
+        baseSnapshot: PanelStateSnapshot,
+        assistantText: String?,
+        status: String
+    ) {
+        var next = PanelStateStore.load() ?? baseSnapshot
+        if let assistantText,
+           !assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            next.messages.append(PanelConversationMessage(role: "assistant", kind: "answer", text: assistantText))
+        }
+        next.status = status
+        next.updatedAt = Date().timeIntervalSince1970
+        try? PanelStateStore.save(next)
+        evaluateRaw("finalizeStreamMessage()")
+        responseTask = nil
+        pushPanelState(status: status, snapshot: next)
     }
 
     private func pushError(_ message: String) {
@@ -468,27 +582,15 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func saveUISettings(reasoningEffort: String) throws {
-        let existing = loadUISettings()
-        let url = uiSettingsURL()
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let payload: [String: Any] = [
-            "reasoning_effort": ["low", "medium", "high"].contains(reasoningEffort) ? reasoningEffort : "medium",
-            "placement_mode": existing["placement_mode"] as? String ?? "remember"
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: .atomic)
+        var payload = normalizedUISettings(loadUISettings())
+        payload["reasoning_effort"] = ["low", "medium", "high"].contains(reasoningEffort) ? reasoningEffort : "medium"
+        try writeUISettings(payload)
     }
 
     func savePlacementMode(_ rawValue: String) throws {
-        let url = uiSettingsURL()
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var payload = loadUISettings()
+        var payload = normalizedUISettings(loadUISettings())
         payload["placement_mode"] = ["left", "right", "remember"].contains(rawValue) ? rawValue : "remember"
-        payload["reasoning_effort"] = payload["reasoning_effort"] as? String ?? "medium"
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: .atomic)
+        try writeUISettings(payload)
 
         if let window = view.window {
             UserDefaults.standard.removeObject(forKey: "NSWindow Frame MainChatWindow")
@@ -499,6 +601,36 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 animated: true
             )
         }
+    }
+
+    private func saveTheme(_ rawValue: String) throws {
+        var payload = normalizedUISettings(loadUISettings())
+        payload["theme"] = normalizedTheme(rawValue)
+        try writeUISettings(payload)
+    }
+
+    private func savePanelVisibilitySettings(
+        showPageInfo: Bool?,
+        showStatusInfo: Bool?
+    ) throws {
+        var payload = normalizedUISettings(loadUISettings())
+        if let showPageInfo {
+            payload["show_page_info"] = showPageInfo
+        }
+        if let showStatusInfo {
+            payload["show_status_info"] = showStatusInfo
+        }
+        try writeUISettings(payload)
+    }
+
+    private func saveCustomSystemPrompt(_ rawValue: String?) throws {
+        var payload = normalizedUISettings(loadUISettings())
+        payload["custom_system_prompt"] = normalizeCustomSystemPrompt(rawValue)
+        try writeUISettings(payload)
+    }
+
+    private func resetCustomSystemPrompt() throws {
+        try saveCustomSystemPrompt("")
     }
 
     private func loadUISettings() -> [String: Any] {
@@ -517,8 +649,24 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     func loadPlacementMode() -> WindowPlacementCoordinator.PlacementMode {
-        let rawValue = loadUISettings()["placement_mode"] as? String ?? "remember"
+        let rawValue = normalizedUISettings(loadUISettings())["placement_mode"] as? String ?? "remember"
         return WindowPlacementCoordinator.PlacementMode(rawValue: rawValue) ?? .remember
+    }
+
+    private func loadTheme() -> String {
+        normalizedUISettings(loadUISettings())["theme"] as? String ?? "blue"
+    }
+
+    private func loadShowPageInfo() -> Bool {
+        normalizedUISettings(loadUISettings())["show_page_info"] as? Bool ?? true
+    }
+
+    private func loadShowStatusInfo() -> Bool {
+        normalizedUISettings(loadUISettings())["show_status_info"] as? Bool ?? true
+    }
+
+    private func loadCustomSystemPrompt() -> String {
+        normalizedUISettings(loadUISettings())["custom_system_prompt"] as? String ?? ""
     }
 
     private func resolvedActiveProvider(
@@ -592,6 +740,45 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         value ?? NSNull()
     }
 
+    private func normalizedTheme(_ rawValue: String?) -> String {
+        let fallback = "blue"
+        guard let rawValue else { return fallback }
+        return ["blue", "orange", "gray", "purple", "green"].contains(rawValue) ? rawValue : fallback
+    }
+
+    private func normalizeCustomSystemPrompt(_ rawValue: String?) -> String {
+        String(rawValue ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix(4000)
+            .description
+    }
+
+    private func normalizedUISettings(_ payload: [String: Any]) -> [String: Any] {
+        [
+            "reasoning_effort": ["low", "medium", "high"].contains(payload["reasoning_effort"] as? String ?? "")
+                ? (payload["reasoning_effort"] as? String ?? "medium")
+                : "medium",
+            "placement_mode": ["left", "right", "remember"].contains(payload["placement_mode"] as? String ?? "")
+                ? (payload["placement_mode"] as? String ?? "remember")
+                : "remember",
+            "theme": normalizedTheme(payload["theme"] as? String),
+            "show_page_info": payload["show_page_info"] as? Bool ?? true,
+            "show_status_info": payload["show_status_info"] as? Bool ?? true,
+            "custom_system_prompt": normalizeCustomSystemPrompt(payload["custom_system_prompt"] as? String)
+        ]
+    }
+
+    private func writeUISettings(_ payload: [String: Any]) throws {
+        let url = uiSettingsURL()
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(
+            withJSONObject: normalizedUISettings(payload),
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: url, options: .atomic)
+    }
+
     private func evaluate(function: String, payload: [String: Any]) {
         guard
             let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -613,4 +800,50 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             self?.pushPanelState()
         }
     }
+
+    private func buildSelectionDebug(
+        snapshotSelection: String?,
+        snapshotDebug: [String: String]?,
+        selectionIntent: String?
+    ) -> [String: Any] {
+        [
+            "snapshotSelection": jsonValue(snapshotSelection),
+            "selectionIntent": jsonValue(selectionIntent),
+            "contentLiveSelection": jsonValue(snapshotDebug?["contentLiveSelection"]),
+            "contentStableSelection": jsonValue(snapshotDebug?["contentStableSelection"]),
+            "backgroundPreviousSelection": jsonValue(snapshotDebug?["backgroundPreviousSelection"]),
+            "backgroundMergedSelection": jsonValue(snapshotDebug?["backgroundMergedSelection"]),
+            "backgroundSelectionMessage": jsonValue(snapshotDebug?["backgroundSelectionMessage"]),
+            "backgroundSource": jsonValue(snapshotDebug?["backgroundSource"]),
+        ]
+    }
+}
+
+func loadCustomSystemPromptFromUISettings() -> String {
+    let url = SharedContainer.baseURL().appendingPathComponent("ui-settings.json")
+    guard
+        let data = try? Data(contentsOf: url),
+        let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        return ""
+    }
+
+    return String(payload["custom_system_prompt"] as? String ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .prefix(4000)
+        .description
+}
+
+func appendCustomSystemPrompt(basePrompt: String) -> String {
+    let customPrompt = loadCustomSystemPromptFromUISettings()
+    guard !customPrompt.isEmpty else {
+        return basePrompt
+    }
+
+    return """
+\(basePrompt)
+
+用户附加系统提示:
+\(customPrompt)
+"""
 }

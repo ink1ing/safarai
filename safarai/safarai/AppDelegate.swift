@@ -7,10 +7,15 @@
 
 import Cocoa
 
+extension Notification.Name {
+    static let assistantPanelShouldRefresh = Notification.Name("assistantPanelShouldRefresh")
+}
+
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var loginRequestTimer: Timer?
     private lazy var floatingPanelController = FloatingPanelController()
+    private var reopenedMainWindowController: NSWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(
@@ -62,9 +67,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else if url.scheme == "safarai", url.host == "show-panel" {
             DispatchQueue.main.async {
-                self.floatingPanelController.showPanel()
+                self.presentAssistantWindow()
             }
         }
     }
 
+    private func presentAssistantWindow() {
+        if let mainWindow = NSApp.windows.first(where: { !($0 is NSPanel) }) {
+            mainWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .assistantPanelShouldRefresh, object: nil)
+            return
+        }
+
+        let storyboard = NSStoryboard(name: "Main", bundle: nil)
+        if let windowController = storyboard.instantiateInitialController() as? NSWindowController {
+            reopenedMainWindowController = windowController
+            windowController.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .assistantPanelShouldRefresh, object: nil)
+            return
+        }
+
+        floatingPanelController.showPanel()
+    }
 }

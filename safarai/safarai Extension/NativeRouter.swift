@@ -107,6 +107,17 @@ enum NativeRouter {
             } catch {
                 return MockNativeRouter.error(code: "sync_panel_state_failed", message: error.localizedDescription)
             }
+        case "sync_selection_intent":
+            let url = ((payload["payload"] as? [String: Any])?["url"] as? String) ?? ""
+            let selection = ((payload["payload"] as? [String: Any])?["selection"] as? String) ?? ""
+            PanelStateWriter.saveSelectionIntent(url: url, selection: selection)
+            return [
+                "ok": true,
+                "payload": [
+                    "request_id": requestId,
+                    "synced": true,
+                ],
+            ]
         default:
             let client = LocalProviderClient(config: config)
             do {
