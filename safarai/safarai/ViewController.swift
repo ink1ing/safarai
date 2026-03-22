@@ -27,6 +27,21 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private var nextSafariToolWindowID = 1
     private var nextSafariToolTabID = 1
 
+    private final class SafariCallbackBox<T> {
+        private let lock = NSLock()
+        private var resumed = false
+
+        func resume(_ continuation: CheckedContinuation<T, Never>, value: T) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !resumed else {
+                return
+            }
+            resumed = true
+            continuation.resume(returning: value)
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -639,23 +654,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         do {
             var transcript = [buildAgentUserInput(prompt: prompt, attachments: attachments)]
             var finalAnswer = ""
-            var lockedTabId = await loadInitialAgentLockedTabID()
-
-            if let lockedTabId {
-                accumulatedSteps.append(
-                    buildAgentStep(
-                        kind: "context",
-                        title: AppText.localized(en: "Locked tab", zh: "锁定标签页"),
-                        detail: "tabId=\(lockedTabId)",
-                        status: "done",
-                        toolName: "get_frontmost_tab",
-                        tabId: lockedTabId,
-                        durationMs: nil,
-                        stdoutPreview: nil,
-                        stderrPreview: nil
-                    )
-                )
-            }
+            var lockedTabId: Int?
 
             for _ in 0..<12 {
                 try Task.checkCancellation()
@@ -1027,9 +1026,9 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func captureSafariWindowSnapshot() async -> [[String: Any]] {
-        let windows = await withCheckedContinuation { continuation in
+        let windows = await awaitSafariCallback(fallback: [SFSafariWindow]()) { completion in
             SFSafariApplication.getAllWindows { windows in
-                continuation.resume(returning: windows)
+                completion(windows)
             }
         }
 
@@ -1044,14 +1043,14 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             nextSafariToolWindowID += 1
             safariToolWindowRegistry[windowID] = window
 
-            let tabs = await withCheckedContinuation { continuation in
+            let tabs = await awaitSafariCallback(fallback: [SFSafariTab]()) { completion in
                 window.getAllTabs { tabs in
-                    continuation.resume(returning: tabs)
+                    completion(tabs)
                 }
             }
-            let activeTab = await withCheckedContinuation { continuation in
+            let activeTab = await awaitSafariCallback(fallback: Optional<SFSafariTab>.none) { completion in
                 window.getActiveTab { tab in
-                    continuation.resume(returning: tab)
+                    completion(tab)
                 }
             }
 
@@ -1087,18 +1086,18 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func loadTabProperties(_ tab: SFSafariTab) async -> (title: String, url: String) {
-        let page = await withCheckedContinuation { continuation in
+        let page = await awaitSafariCallback(fallback: Optional<SFSafariPage>.none) { completion in
             tab.getActivePage { page in
-                continuation.resume(returning: page)
+                completion(page)
             }
         }
         guard let page else {
             return ("", "")
         }
 
-        return await withCheckedContinuation { continuation in
+        return await awaitSafariCallback(fallback: ("", "")) { completion in
             page.getPropertiesWithCompletionHandler { properties in
-                continuation.resume(returning: (
+                completion((
                     properties?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
                     properties?.url?.absoluteString ?? ""
                 ))
@@ -1126,15 +1125,20 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         return nil
     }
 
-    private func loadInitialAgentLockedTabID() async -> Int? {
-        guard
-            let result = try? await executeAgentTool(toolName: "get_frontmost_tab", arguments: [:]),
-            let data = result["data"] as? [String: Any],
-            let tab = data["tab"] as? [String: Any]
-        else {
-            return nil
+    private func awaitSafariCallback<T>(
+        timeout: TimeInterval = 2.0,
+        fallback: @autoclosure @escaping () -> T,
+        register: (@escaping (T) -> Void) -> Void
+    ) async -> T {
+        await withCheckedContinuation { continuation in
+            let box = SafariCallbackBox<T>()
+            register { value in
+                box.resume(continuation, value: value)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                box.resume(continuation, value: fallback())
+            }
         }
-        return normalizedInt(from: tab["tabId"])
     }
 
     private func injectLockedTabIDIfNeeded(
