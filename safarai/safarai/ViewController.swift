@@ -627,25 +627,53 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         attachments: [PanelAttachment],
         baseSnapshot: PanelStateSnapshot
     ) async {
+        var latestResponseId: String?
+        var accumulatedSteps = (agentSessionState?["steps"] as? [[String: Any]]) ?? []
         do {
             var currentInput = [buildAgentUserInput(prompt: prompt, attachments: attachments)]
+            var transcript = currentInput
             var finalAnswer = ""
+            var lockedTabId = await loadInitialAgentLockedTabID()
+
+            if let lockedTabId {
+                accumulatedSteps.append(
+                    buildAgentStep(
+                        kind: "context",
+                        title: AppText.localized(en: "Locked tab", zh: "锁定标签页"),
+                        detail: "tabId=\(lockedTabId)",
+                        status: "done",
+                        toolName: "get_frontmost_tab",
+                        tabId: lockedTabId,
+                        durationMs: nil,
+                        stdoutPreview: nil,
+                        stderrPreview: nil
+                    )
+                )
+            }
 
             for _ in 0..<12 {
                 try Task.checkCancellation()
 
                 let response = try await CodexResponseService.shared.createAgentResponse(
                     input: currentInput,
-                    tools: buildAgentToolDefinitions()
+                    tools: buildAgentToolDefinitions(),
+                    previousResponseId: latestResponseId,
+                    fallbackInput: transcript
                 )
-                let responseId = response["id"] as? String
+                latestResponseId = response["id"] as? String ?? latestResponseId
+                if let outputItems = response["output"] as? [[String: Any]], !outputItems.isEmpty {
+                    transcript.append(contentsOf: outputItems)
+                }
 
                 let parsed = parseAgentResponse(response)
+                if !parsed.steps.isEmpty {
+                    accumulatedSteps.append(contentsOf: parsed.steps)
+                }
                 await MainActor.run {
                     self.agentSessionState = self.buildAgentState(
-                        status: parsed.functionCalls.isEmpty ? "executing" : "awaiting_approval",
-                        responseId: responseId,
-                        steps: parsed.steps,
+                        status: parsed.functionCalls.isEmpty ? "executing" : "executing",
+                        responseId: latestResponseId,
+                        steps: accumulatedSteps,
                         pendingApproval: nil,
                         finalAnswer: nil,
                         error: nil
@@ -658,56 +686,89 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     break
                 }
 
-                guard let functionCall = parsed.functionCalls.first else {
+                guard !parsed.functionCalls.isEmpty else {
                     break
                 }
 
-                let toolArgs = functionCall["arguments"] as? [String: Any] ?? [:]
-                let toolName = functionCall["name"] as? String ?? ""
-                let callId = functionCall["callId"] as? String ?? ""
-                let riskLevel = riskLevelForTool(toolName)
+                var nextInput: [[String: Any]] = []
+                for functionCall in parsed.functionCalls {
+                    let toolName = functionCall["name"] as? String ?? ""
+                    let callId = functionCall["callId"] as? String ?? ""
+                    var toolArgs = functionCall["arguments"] as? [String: Any] ?? [:]
+                    toolArgs = injectLockedTabIDIfNeeded(toolName: toolName, arguments: toolArgs, lockedTabId: lockedTabId)
 
-                var toolResult: [String: Any]
-                if requiresApproval(riskLevel: riskLevel) {
-                    let approvalPayload = buildApprovalPayload(
-                        toolName: toolName,
-                        arguments: toolArgs,
-                        riskLevel: riskLevel
-                    )
+                    let executionStatus = isScriptTool(toolName)
+                        ? "running_script"
+                        : "executing"
                     await MainActor.run {
                         self.agentSessionState = self.buildAgentState(
-                            status: "awaiting_approval",
-                            responseId: responseId,
-                            steps: parsed.steps,
-                            pendingApproval: approvalPayload,
+                            status: executionStatus,
+                            responseId: latestResponseId,
+                            steps: accumulatedSteps,
+                            pendingApproval: nil,
                             finalAnswer: nil,
                             error: nil
                         )
-                        self.pushPanelState(status: AppText.localized(en: "Awaiting approval", zh: "等待确认"), snapshot: baseSnapshot)
+                        self.pushPanelState(
+                            status: isScriptTool(toolName)
+                                ? AppText.localized(en: "Agent running script", zh: "Agent 正在执行脚本")
+                                : AppText.localized(en: "Agent executing tool", zh: "Agent 正在执行工具"),
+                            snapshot: baseSnapshot
+                        )
                     }
-                    let approved = await waitForAgentApproval()
-                    if !approved {
-                        toolResult = [
-                            "ok": false,
-                            "errorCode": "user_denied",
-                            "humanSummary": AppText.localized(en: "User denied the action.", zh: "用户拒绝了该动作。")
-                        ]
-                    } else {
-                        toolResult = try await executeAgentTool(toolName: toolName, arguments: toolArgs)
+
+                    let startedAt = Date()
+                    let toolResult = try await executeAgentTool(toolName: toolName, arguments: toolArgs)
+                    let durationMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                    if let nextLockedTabId = updatedLockedTabID(toolName: toolName, result: toolResult) {
+                        lockedTabId = nextLockedTabId
                     }
-                } else {
-                    toolResult = try await executeAgentTool(toolName: toolName, arguments: toolArgs)
+
+                    accumulatedSteps.append(
+                        buildAgentStep(
+                            kind: isScriptTool(toolName) ? "script_result" : "tool_result",
+                            title: toolName,
+                            detail: String(describing: toolResult["humanSummary"] ?? toolName),
+                            status: (toolResult["ok"] as? Bool) == false ? "failed" : "done",
+                            toolName: toolName,
+                            tabId: normalizedInt(from: toolArgs["tabId"]) ?? normalizedInt(from: toolResult["tabId"]) ?? normalizedInt(from: (toolResult["data"] as? [String: Any])?["tabId"]),
+                            durationMs: durationMs,
+                            stdoutPreview: previewText(toolResult["stdout"]),
+                            stderrPreview: previewText(toolResult["stderr"])
+                        )
+                    )
+
+                    let functionOutput: [String: Any] = [
+                        "type": "function_call_output",
+                        "call_id": callId,
+                        "output": stringifyJSON(toolResult),
+                    ]
+                    nextInput.append(functionOutput)
+                    transcript.append(functionOutput)
+
+                    await MainActor.run {
+                        self.agentSessionState = self.buildAgentState(
+                            status: "executing",
+                            responseId: latestResponseId,
+                            steps: accumulatedSteps,
+                            pendingApproval: nil,
+                            finalAnswer: nil,
+                            error: nil
+                        )
+                        self.pushPanelState(status: AppText.localized(en: "Agent executing", zh: "Agent 正在执行"), snapshot: baseSnapshot)
+                    }
                 }
 
-                currentInput = [[
-                    "type": "function_call_output",
-                    "call_id": callId,
-                    "output": stringifyJSON(toolResult),
-                ]]
+                currentInput = nextInput
             }
 
             await MainActor.run {
-                self.finishAgentRun(baseSnapshot: baseSnapshot, finalAnswer: finalAnswer)
+                self.finishAgentRun(
+                    baseSnapshot: baseSnapshot,
+                    finalAnswer: finalAnswer,
+                    responseId: latestResponseId,
+                    steps: accumulatedSteps
+                )
             }
         } catch is CancellationError {
             await MainActor.run {
@@ -718,7 +779,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 self.agentTask = nil
                 self.agentSessionState = self.buildAgentState(
                     status: "failed",
-                    responseId: self.agentSessionState?["responseId"] as? String,
+                    responseId: latestResponseId,
                     steps: (self.agentSessionState?["steps"] as? [[String: Any]]) ?? [],
                     pendingApproval: nil,
                     finalAnswer: nil,
@@ -736,6 +797,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func executeAgentTool(toolName: String, arguments: [String: Any]) async throws -> [String: Any] {
+        if toolName == "run_shell_command" {
+            return await runAgentShellCommand(arguments: arguments)
+        }
+        if toolName == "run_applescript" {
+            return await runAgentAppleScript(arguments: arguments)
+        }
+
         let requestId = try AgentBridgeStore.enqueue(toolName: toolName, arguments: arguments)
         let start = Date()
         while Date().timeIntervalSince(start) < 20 {
@@ -754,7 +822,261 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         ]
     }
 
-    private func finishAgentRun(baseSnapshot: PanelStateSnapshot, finalAnswer: String) {
+    private func loadInitialAgentLockedTabID() async -> Int? {
+        guard
+            let result = try? await executeAgentTool(toolName: "get_frontmost_tab", arguments: [:]),
+            let data = result["data"] as? [String: Any],
+            let tab = data["tab"] as? [String: Any]
+        else {
+            return nil
+        }
+        return normalizedInt(from: tab["tabId"])
+    }
+
+    private func injectLockedTabIDIfNeeded(
+        toolName: String,
+        arguments: [String: Any],
+        lockedTabId: Int?
+    ) -> [String: Any] {
+        guard isPageBoundTool(toolName), arguments["tabId"] == nil, let lockedTabId else {
+            return arguments
+        }
+
+        var next = arguments
+        next["tabId"] = lockedTabId
+        return next
+    }
+
+    private func isPageBoundTool(_ toolName: String) -> Bool {
+        switch toolName {
+        case "get_page_context",
+             "list_interactive_targets",
+             "highlight_target",
+             "focus_target",
+             "scroll_to_target",
+             "click_target",
+             "read_target",
+             "fill_target",
+             "navigate_page",
+             "extract_structured_data":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isScriptTool(_ toolName: String) -> Bool {
+        toolName == "run_shell_command" || toolName == "run_applescript"
+    }
+
+    private func updatedLockedTabID(toolName: String, result: [String: Any]) -> Int? {
+        switch toolName {
+        case "get_frontmost_tab":
+            if let data = result["data"] as? [String: Any],
+               let tab = data["tab"] as? [String: Any] {
+                return normalizedInt(from: tab["tabId"])
+            }
+            return nil
+        case "activate_tab", "open_tab", "navigate_tab":
+            return normalizedInt(from: result["tabId"])
+                ?? normalizedInt(from: (result["data"] as? [String: Any])?["tabId"])
+        default:
+            return nil
+        }
+    }
+
+    private func normalizedInt(from value: Any?) -> Int? {
+        if let intValue = value as? Int {
+            return intValue
+        }
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let stringValue = value as? String,
+           let parsed = Int(stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return parsed
+        }
+        return nil
+    }
+
+    private func previewText(_ value: Any?) -> String? {
+        let normalized = String(describing: value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized != "nil" else {
+            return nil
+        }
+        return String(normalized.prefix(280))
+    }
+
+    private func runAgentShellCommand(arguments: [String: Any]) async -> [String: Any] {
+        let command = String(describing: arguments["command"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else {
+            return [
+                "ok": false,
+                "errorCode": "missing_command",
+                "humanSummary": AppText.localized(en: "Shell command is required.", zh: "缺少 shell 命令。"),
+            ]
+        }
+
+        let cwd = (arguments["cwd"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let timeoutMs = boundedTimeout(arguments["timeoutMs"], defaultValue: 15_000, maximum: 60_000)
+        return await runHostProcess(
+            executableURL: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-lc", command],
+            cwd: cwd,
+            timeoutMs: timeoutMs,
+            successSummary: AppText.localized(en: "Shell command completed.", zh: "Shell 命令执行完成。"),
+            failurePrefix: AppText.localized(en: "Shell command failed", zh: "Shell 命令执行失败"),
+            timeoutSummary: AppText.localized(en: "Shell command timed out.", zh: "Shell 命令执行超时。")
+        )
+    }
+
+    private func runAgentAppleScript(arguments: [String: Any]) async -> [String: Any] {
+        let script = String(describing: arguments["script"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !script.isEmpty else {
+            return [
+                "ok": false,
+                "errorCode": "missing_script",
+                "humanSummary": AppText.localized(en: "AppleScript text is required.", zh: "缺少 AppleScript 脚本文本。"),
+            ]
+        }
+
+        let language = (arguments["language"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? "applescript"
+        let timeoutMs = boundedTimeout(arguments["timeoutMs"], defaultValue: 20_000, maximum: 60_000)
+        var processArguments: [String] = []
+        if language == "javascript" {
+            processArguments += ["-l", "JavaScript"]
+        }
+        processArguments += ["-e", script]
+
+        return await runHostProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
+            arguments: processArguments,
+            cwd: nil,
+            timeoutMs: timeoutMs,
+            successSummary: AppText.localized(en: "AppleScript completed.", zh: "AppleScript 执行完成。"),
+            failurePrefix: AppText.localized(en: "AppleScript failed", zh: "AppleScript 执行失败"),
+            timeoutSummary: AppText.localized(en: "AppleScript timed out.", zh: "AppleScript 执行超时。")
+        )
+    }
+
+    private func boundedTimeout(_ value: Any?, defaultValue: Int, maximum: Int) -> Int {
+        let requested = normalizedInt(from: value) ?? defaultValue
+        return min(max(requested, 1000), maximum)
+    }
+
+    private func runHostProcess(
+        executableURL: URL,
+        arguments: [String],
+        cwd: String?,
+        timeoutMs: Int,
+        successSummary: String,
+        failurePrefix: String,
+        timeoutSummary: String
+    ) async -> [String: Any] {
+        if let cwd, !cwd.isEmpty {
+            guard cwd.hasPrefix("/") else {
+                return [
+                    "ok": false,
+                    "errorCode": "invalid_cwd",
+                    "humanSummary": AppText.localized(en: "cwd must be an absolute path.", zh: "cwd 必须是绝对路径。"),
+                ]
+            }
+        }
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.executableURL = executableURL
+                process.arguments = arguments
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+                if let cwd, !cwd.isEmpty {
+                    process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
+                }
+
+                let startedAt = Date()
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(returning: [
+                        "ok": false,
+                        "errorCode": "process_start_failed",
+                        "humanSummary": error.localizedDescription,
+                        "stdout": "",
+                        "stderr": error.localizedDescription,
+                        "exitCode": -1,
+                        "durationMs": 0,
+                        "truncated": false,
+                    ])
+                    return
+                }
+
+                let deadline = startedAt.addingTimeInterval(Double(timeoutMs) / 1000.0)
+                var timedOut = false
+                while process.isRunning {
+                    if Date() >= deadline {
+                        timedOut = true
+                        process.terminate()
+                        break
+                    }
+                    usleep(50_000)
+                }
+                if process.isRunning {
+                    process.waitUntilExit()
+                }
+
+                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let stdout = self.truncatedProcessOutput(stdoutData)
+                let stderr = self.truncatedProcessOutput(stderrData)
+                let durationMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                let exitCode = timedOut ? -9 : Int(process.terminationStatus)
+                let ok = !timedOut && exitCode == 0
+                let summary: String
+                if timedOut {
+                    summary = timeoutSummary
+                } else if ok {
+                    summary = successSummary
+                } else {
+                    summary = "\(failurePrefix) (\(exitCode))."
+                }
+
+                continuation.resume(returning: [
+                    "ok": ok,
+                    "errorCode": ok ? "" : (timedOut ? "process_timeout" : "process_failed"),
+                    "humanSummary": summary,
+                    "stdout": stdout.text,
+                    "stderr": stderr.text,
+                    "exitCode": exitCode,
+                    "durationMs": durationMs,
+                    "truncated": stdout.truncated || stderr.truncated,
+                ])
+            }
+        }
+    }
+
+    private func truncatedProcessOutput(_ data: Data) -> (text: String, truncated: Bool) {
+        let maxBytes = 32 * 1024
+        let truncated = data.count > maxBytes
+        let slice = truncated ? data.prefix(maxBytes) : data[...]
+        let text = String(data: Data(slice), encoding: .utf8) ?? ""
+        return (text, truncated)
+    }
+
+    private func finishAgentRun(
+        baseSnapshot: PanelStateSnapshot,
+        finalAnswer: String,
+        responseId: String?,
+        steps: [[String: Any]]
+    ) {
         agentTask = nil
         var snapshot = PanelStateStore.load() ?? baseSnapshot
         if !finalAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -766,8 +1088,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
         agentSessionState = buildAgentState(
             status: "done",
-            responseId: agentSessionState?["responseId"] as? String,
-            steps: (agentSessionState?["steps"] as? [[String: Any]]) ?? [],
+            responseId: responseId,
+            steps: steps,
             pendingApproval: nil,
             finalAnswer: finalAnswer,
             error: nil
@@ -1450,19 +1772,87 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         let noArgSchema: [String: Any] = [
             "type": "object",
             "properties": [:],
+            "required": [],
             "additionalProperties": false
+        ]
+        let pageTabProperty: [String: Any] = [
+            "type": "integer",
+            "description": "Browser tab id. If omitted, use the agent's locked tab."
         ]
         let targetSchema: [String: Any] = [
             "type": "object",
             "properties": [
+                "tabId": pageTabProperty,
                 "targetId": ["type": "string", "description": "Interactive target id from list_interactive_targets"]
             ],
             "required": ["targetId"],
             "additionalProperties": false
         ]
+        let pageOnlySchema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "tabId": pageTabProperty
+            ],
+            "additionalProperties": false
+        ]
         return [
-            buildAgentTool(name: "get_page_context", description: "Get the latest page context for the current Safari page.", parameters: noArgSchema),
-            buildAgentTool(name: "list_interactive_targets", description: "List interactive targets on the current Safari page.", parameters: noArgSchema),
+            buildAgentTool(name: "list_safari_windows_tabs", description: "List all Safari windows and tabs with browser tab ids.", parameters: noArgSchema),
+            buildAgentTool(name: "get_frontmost_tab", description: "Get the frontmost active Safari tab.", parameters: noArgSchema),
+            buildAgentTool(
+                name: "activate_tab",
+                description: "Activate a Safari tab by tab id.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "tabId": ["type": "integer"],
+                        "windowId": ["type": "integer"]
+                    ],
+                    "required": ["tabId"],
+                    "additionalProperties": false
+                ]
+            ),
+            buildAgentTool(
+                name: "open_tab",
+                description: "Open a new Safari tab.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "url": ["type": "string"],
+                        "windowId": ["type": "integer"],
+                        "active": ["type": "boolean"]
+                    ],
+                    "required": ["url"],
+                    "additionalProperties": false
+                ]
+            ),
+            buildAgentTool(
+                name: "close_tab",
+                description: "Close a Safari tab by tab id.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "tabId": ["type": "integer"]
+                    ],
+                    "required": ["tabId"],
+                    "additionalProperties": false
+                ]
+            ),
+            buildAgentTool(
+                name: "navigate_tab",
+                description: "Navigate a Safari tab to a new URL.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "tabId": ["type": "integer"],
+                        "url": ["type": "string"],
+                        "active": ["type": "boolean"]
+                    ],
+                    "required": ["tabId", "url"],
+                    "additionalProperties": false
+                ]
+            ),
+            buildAgentTool(name: "get_page_context", description: "Get the latest page context for a Safari page.", parameters: pageOnlySchema),
+            buildAgentTool(name: "list_interactive_targets", description: "List interactive targets on a Safari page.", parameters: pageOnlySchema),
             buildAgentTool(name: "highlight_target", description: "Highlight a target without causing side effects.", parameters: targetSchema),
             buildAgentTool(name: "focus_target", description: "Focus a target element.", parameters: targetSchema),
             buildAgentTool(name: "scroll_to_target", description: "Scroll the page so the target is visible.", parameters: targetSchema),
@@ -1474,6 +1864,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 parameters: [
                     "type": "object",
                     "properties": [
+                        "tabId": pageTabProperty,
                         "targetId": ["type": "string"],
                         "text": ["type": "string"]
                     ],
@@ -1487,13 +1878,42 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 parameters: [
                     "type": "object",
                     "properties": [
+                        "tabId": pageTabProperty,
                         "url": ["type": "string"]
                     ],
                     "required": ["url"],
                     "additionalProperties": false
                 ]
             ),
-            buildAgentTool(name: "extract_structured_data", description: "Return structured data from the current page context.", parameters: noArgSchema)
+            buildAgentTool(name: "extract_structured_data", description: "Return structured data from the current page context.", parameters: pageOnlySchema),
+            buildAgentTool(
+                name: "run_shell_command",
+                description: "Run a shell command on the host macOS machine.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "command": ["type": "string"],
+                        "cwd": ["type": "string"],
+                        "timeoutMs": ["type": "integer"]
+                    ],
+                    "required": ["command"],
+                    "additionalProperties": false
+                ]
+            ),
+            buildAgentTool(
+                name: "run_applescript",
+                description: "Run AppleScript or JXA on the host macOS machine.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "script": ["type": "string"],
+                        "language": ["type": "string", "enum": ["applescript", "javascript"]],
+                        "timeoutMs": ["type": "integer"]
+                    ],
+                    "required": ["script"],
+                    "additionalProperties": false
+                ]
+            )
         ]
     }
 
@@ -1503,6 +1923,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "name": name,
             "description": description,
             "parameters": parameters,
+            "strict": true,
         ]
     }
 
@@ -1538,7 +1959,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     "callId": callId,
                     "arguments": callArguments
                 ])
-                steps.append(buildAgentStep(kind: "tool_call", title: name, detail: argumentsText, status: "pending"))
+                steps.append(buildAgentStep(kind: "tool_call", title: name, detail: argumentsText, status: "pending", toolName: name))
             } else if type == "computer_call" {
                 steps.append(buildAgentStep(kind: "computer_call", title: "computer_call", detail: "stub", status: "pending"))
             }
@@ -1580,15 +2001,30 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         ]
     }
 
-    private func buildAgentStep(kind: String, title: String, detail: String, status: String) -> [String: Any] {
+    private func buildAgentStep(
+        kind: String,
+        title: String,
+        detail: String,
+        status: String,
+        toolName: String? = nil,
+        tabId: Int? = nil,
+        durationMs: Int? = nil,
+        stdoutPreview: String? = nil,
+        stderrPreview: String? = nil
+    ) -> [String: Any] {
         [
             "id": UUID().uuidString.lowercased(),
             "kind": kind,
             "title": title,
             "detail": detail,
             "status": status,
+            "toolName": jsonValue(toolName),
+            "tabId": jsonValue(tabId),
+            "durationMs": jsonValue(durationMs),
+            "stdoutPreview": jsonValue(stdoutPreview),
+            "stderrPreview": jsonValue(stderrPreview),
             "startedAt": Date().timeIntervalSince1970,
-            "completedAt": status == "done" ? Date().timeIntervalSince1970 : NSNull(),
+            "completedAt": (status == "done" || status == "failed") ? Date().timeIntervalSince1970 : NSNull(),
             "toolCallId": NSNull(),
         ]
     }

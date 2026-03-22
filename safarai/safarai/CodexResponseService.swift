@@ -1,5 +1,66 @@
 import Foundation
 
+private struct AgentResponseAccumulator {
+    var responseID: String?
+    var completedResponse: [String: Any]?
+    var outputItems: [Int: [String: Any]] = [:]
+    var orderedIndices: [Int] = []
+    var functionArgumentBuffers: [String: String] = [:]
+
+    mutating func registerOutputItem(index: Int, item: [String: Any]) {
+        outputItems[index] = merge(item, into: outputItems[index] ?? [:])
+        if !orderedIndices.contains(index) {
+            orderedIndices.append(index)
+            orderedIndices.sort()
+        }
+    }
+
+    mutating func appendFunctionArguments(identifier: String, delta: String) {
+        functionArgumentBuffers[identifier, default: ""] += delta
+    }
+
+    mutating func finalizeFunctionArguments(identifier: String, arguments: String) {
+        functionArgumentBuffers[identifier] = arguments
+    }
+
+    func buildResponse() -> [String: Any]? {
+        if let completedResponse {
+            return completedResponse
+        }
+        guard !outputItems.isEmpty else {
+            return nil
+        }
+
+        let normalizedOutput = orderedIndices.compactMap { index -> [String: Any]? in
+            guard var item = outputItems[index] else {
+                return nil
+            }
+            let identifier = String(describing: item["call_id"] ?? item["item_id"] ?? index)
+            if item["type"] as? String == "function_call",
+               let bufferedArguments = functionArgumentBuffers[identifier],
+               !bufferedArguments.isEmpty {
+                item["arguments"] = bufferedArguments
+            }
+            return item
+        }
+
+        return [
+            "id": responseID as Any,
+            "output": normalizedOutput,
+        ]
+    }
+
+    private func merge(_ incoming: [String: Any], into existing: [String: Any]) -> [String: Any] {
+        var merged = existing
+        for (key, value) in incoming {
+            if !(value is NSNull) {
+                merged[key] = value
+            }
+        }
+        return merged
+    }
+}
+
 enum CodexResponseError: LocalizedError {
     case notLoggedIn
     case invalidResponse
@@ -38,78 +99,47 @@ final class CodexResponseService {
 
     func createAgentResponse(
         input: [[String: Any]],
-        tools: [[String: Any]]
+        tools: [[String: Any]],
+        previousResponseId: String? = nil,
+        fallbackInput: [[String: Any]]? = nil
     ) async throws -> [String: Any] {
         guard var configuration = CodexAccountStore.load() else {
             throw CodexResponseError.notLoggedIn
         }
         configuration = try await CodexOAuthService.shared.refreshIfNeeded(configuration)
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": "gpt-5.4",
             "input": input,
             "tools": tools,
             "tool_choice": "auto",
             "stream": true,
-            "store": false,
+            "store": true,
             "parallel_tool_calls": false,
             "reasoning": ["effort": "medium", "summary": "auto"],
             "instructions": """
 你是 Safari 页内 agent。必须优先通过工具获取页面事实，再决定动作。
 只能使用当前提供的白名单工具，不能假设工具之外的能力。
-如需点击、导航、聚焦、写入等高风险动作，可以先提出工具调用；宿主会进行确认。
-禁止自动提交、禁止绕过确认、禁止编造页面状态。
+你可以自动执行已注册的工具与脚本，但绝不允许自动提交表单。
+优先读取页面和标签页状态，再做点击、导航、写入或脚本动作。
+禁止编造页面状态、标签页状态或脚本执行结果。
 """,
         ]
-
-        var request = URLRequest(url: baseURL.appendingPathComponent("responses"))
-        request.httpMethod = "POST"
-        request.allHTTPHeaderFields = [
-            "Content-Type": "application/json",
-            "Authorization": "Bearer \(configuration.tokens.accessToken)",
-            "Accept": "text/event-stream",
-            "Connection": "Keep-Alive",
-            "Openai-Beta": "responses=experimental",
-            "User-Agent": "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
-            "Originator": "codex_cli_rs",
-            "Version": "0.21.0",
-            "Chatgpt-Account-Id": configuration.account.accountId,
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body.filterNilValues())
-
-        let (asyncBytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw CodexResponseError.invalidResponse
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            var bodyData = Data()
-            for try await byte in asyncBytes { bodyData.append(byte) }
-            let message = String(data: bodyData, encoding: .utf8) ?? "unknown"
-            throw CodexResponseError.upstreamStatus(http.statusCode, message)
+        if let previousResponseId, !previousResponseId.isEmpty {
+            body["previous_response_id"] = previousResponseId
         }
 
-        var lineBuffer = Data()
-        var completedResponse: [String: Any]?
-        for try await byte in asyncBytes {
-            if byte == UInt8(ascii: "\n") {
-                if let line = String(data: lineBuffer, encoding: .utf8),
-                   let completed = parseCompletedAgentLine(line) {
-                    completedResponse = completed
-                }
-                lineBuffer.removeAll(keepingCapacity: true)
-            } else {
-                lineBuffer.append(byte)
+        do {
+            return try await performAgentResponseRequest(body: body, configuration: configuration)
+        } catch CodexResponseError.upstreamStatus(let status, _) where previousResponseId != nil && (400..<500).contains(status) {
+            guard let fallbackInput, !fallbackInput.isEmpty else {
+                throw CodexResponseError.upstreamStatus(status, "previous_response_id failed and no fallback input was provided")
             }
+            var fallbackBody = body
+            fallbackBody["previous_response_id"] = NSNull()
+            fallbackBody["input"] = fallbackInput
+            return try await performAgentResponseRequest(body: fallbackBody, configuration: configuration)
         }
-        if !lineBuffer.isEmpty,
-           let line = String(data: lineBuffer, encoding: .utf8),
-           let completed = parseCompletedAgentLine(line) {
-            completedResponse = completed
-        }
-        guard let completedResponse else {
-            throw CodexResponseError.invalidResponse
-        }
-        return completedResponse
     }
 
     func streamQuestion(
@@ -309,24 +339,122 @@ final class CodexResponseService {
     }
 
     private func parseCompletedAgentLine(_ raw: String) -> [String: Any]? {
+        var accumulator = AgentResponseAccumulator()
+        parseAgentEventLine(raw, accumulator: &accumulator)
+        return accumulator.buildResponse()
+    }
+
+    private func performAgentResponseRequest(
+        body: [String: Any],
+        configuration: CodexAccountConfiguration
+    ) async throws -> [String: Any] {
+        var request = URLRequest(url: baseURL.appendingPathComponent("responses"))
+        request.httpMethod = "POST"
+        request.allHTTPHeaderFields = [
+            "Content-Type": "application/json",
+            "Authorization": "Bearer \(configuration.tokens.accessToken)",
+            "Accept": "text/event-stream",
+            "Connection": "Keep-Alive",
+            "Openai-Beta": "responses=experimental",
+            "User-Agent": "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
+            "Originator": "codex_cli_rs",
+            "Version": "0.21.0",
+            "Chatgpt-Account-Id": configuration.account.accountId,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body.filterNilValues())
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw CodexResponseError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            var bodyData = Data()
+            for try await byte in asyncBytes { bodyData.append(byte) }
+            let message = String(data: bodyData, encoding: .utf8) ?? "unknown"
+            throw CodexResponseError.upstreamStatus(http.statusCode, message)
+        }
+
+        var lineBuffer = Data()
+        var accumulator = AgentResponseAccumulator()
+        for try await byte in asyncBytes {
+            if byte == UInt8(ascii: "\n") {
+                if let line = String(data: lineBuffer, encoding: .utf8) {
+                    parseAgentEventLine(line, accumulator: &accumulator)
+                }
+                lineBuffer.removeAll(keepingCapacity: true)
+            } else {
+                lineBuffer.append(byte)
+            }
+        }
+
+        if !lineBuffer.isEmpty, let line = String(data: lineBuffer, encoding: .utf8) {
+            parseAgentEventLine(line, accumulator: &accumulator)
+        }
+
+        guard let responsePayload = accumulator.buildResponse() else {
+            throw CodexResponseError.invalidResponse
+        }
+        return responsePayload
+    }
+
+    private func parseAgentEventLine(_ raw: String, accumulator: inout AgentResponseAccumulator) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("data:") else { return nil }
+        guard trimmed.hasPrefix("data:") else { return }
         let value = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard value != "[DONE]", !value.isEmpty else { return nil }
+        guard value != "[DONE]", !value.isEmpty else { return }
         guard let data = value.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         if let type = json["type"] as? String,
            type == "response.completed",
            let response = json["response"] as? [String: Any] {
-            return response
+            accumulator.responseID = response["id"] as? String ?? accumulator.responseID
+            accumulator.completedResponse = response
+            return
         }
 
-        if let response = json["response"] as? [String: Any],
-           json["type"] as? String == "response.output_item.done" {
-            return response
+        if let response = json["response"] as? [String: Any] {
+            accumulator.responseID = response["id"] as? String ?? accumulator.responseID
         }
 
+        let outputIndex = normalizedOutputIndex(json["output_index"])
+            ?? normalizedOutputIndex(json["index"])
+            ?? normalizedOutputIndex((json["item"] as? [String: Any])?["index"])
+            ?? normalizedOutputIndex((json["output_item"] as? [String: Any])?["index"])
+
+        let item = (json["item"] as? [String: Any]) ?? (json["output_item"] as? [String: Any])
+        if let item, let outputIndex {
+            accumulator.registerOutputItem(index: outputIndex, item: item)
+        }
+
+        let type = json["type"] as? String ?? ""
+        if type == "response.function_call_arguments.delta" || type == "response.function_call_arguments.done" {
+            let identifier = String(
+                describing:
+                    json["call_id"]
+                    ?? json["item_id"]
+                    ?? outputIndex
+                    ?? UUID().uuidString.lowercased()
+            )
+            if let delta = json["delta"] as? String, !delta.isEmpty {
+                accumulator.appendFunctionArguments(identifier: identifier, delta: delta)
+            }
+            if let arguments = json["arguments"] as? String, !arguments.isEmpty {
+                accumulator.finalizeFunctionArguments(identifier: identifier, arguments: arguments)
+            }
+        }
+    }
+
+    private func normalizedOutputIndex(_ value: Any?) -> Int? {
+        if let intValue = value as? Int {
+            return intValue
+        }
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let stringValue = value as? String, let intValue = Int(stringValue) {
+            return intValue
+        }
         return nil
     }
 

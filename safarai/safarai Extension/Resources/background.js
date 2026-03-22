@@ -476,22 +476,48 @@ async function performTargetAction(tabIdFromSender, action, targetId) {
 }
 
 async function ensurePageContext(tabIdFromSender) {
-  if (tabIdFromSender && TAB_STATE.has(tabIdFromSender)) {
+  const resolvedTabId = await resolveTabId(tabIdFromSender);
+  if (!resolvedTabId) {
+    return createErrorResponse("tab_not_found", "未找到当前标签页");
+  }
+
+  if (TAB_STATE.has(resolvedTabId)) {
     return createSuccessResponse({
-      context: TAB_STATE.get(tabIdFromSender),
+      context: TAB_STATE.get(resolvedTabId),
       cached: true,
     });
   }
 
-  const fresh = await loadPageContextForActiveTab();
-  if (!fresh.ok) {
-    return fresh;
+  const tab = await browser.tabs.get(resolvedTabId).catch(() => null);
+  if (!tab?.id) {
+    return createErrorResponse("tab_not_found", "未找到当前标签页");
   }
 
-  return createSuccessResponse({
-      context: fresh.payload.context,
+  const fresh = await requestPageContext(resolvedTabId);
+  if (!fresh.ok) {
+    const degraded = buildDegradedContextPayload(
+      tab,
+      TAB_STATE.get(resolvedTabId),
+      "request_page_context_failed",
+      fresh.error?.message ?? ""
+    );
+    TAB_STATE.set(resolvedTabId, mergeStableSelection(TAB_STATE.get(resolvedTabId), degraded.context, "ensurePageContext"));
+    return createSuccessResponse({
+      context: TAB_STATE.get(resolvedTabId),
       cached: false,
+      degraded: true,
     });
+  }
+
+  TAB_STATE.set(
+    resolvedTabId,
+    mergeStableSelection(TAB_STATE.get(resolvedTabId), fresh.payload?.context ?? {}, "ensurePageContext")
+  );
+
+  return createSuccessResponse({
+    context: TAB_STATE.get(resolvedTabId),
+    cached: false,
+  });
 }
 
 async function syncPanelState(tabId, context) {
@@ -565,7 +591,41 @@ async function pollAgentToolRequests() {
 async function executeAgentToolRequest(request) {
   const toolName = String(request.toolName || "");
   const args = request.arguments ?? {};
-  const tabId = await resolveTabId(null);
+  const explicitTabId = normalizeRequestedTabId(args.tabId);
+
+  if (toolName === "list_safari_windows_tabs") {
+    return listSafariWindowsTabs();
+  }
+
+  if (toolName === "get_frontmost_tab") {
+    return getFrontmostTab();
+  }
+
+  if (toolName === "activate_tab") {
+    return activateSafariTab(explicitTabId, normalizeRequestedWindowId(args.windowId));
+  }
+
+  if (toolName === "open_tab") {
+    return openSafariTab({
+      url: args.url,
+      windowId: normalizeRequestedWindowId(args.windowId),
+      active: args.active !== false,
+    });
+  }
+
+  if (toolName === "close_tab") {
+    return closeSafariTab(explicitTabId);
+  }
+
+  if (toolName === "navigate_tab") {
+    return navigateSafariTab({
+      tabId: explicitTabId,
+      url: args.url,
+      active: args.active !== false,
+    });
+  }
+
+  const tabId = await resolveTabId(explicitTabId);
   if (!tabId) {
     return {
       ok: false,
@@ -690,12 +750,255 @@ async function executeAgentToolRequest(request) {
 }
 
 async function resolveTabId(tabIdFromSender) {
-  if (tabIdFromSender) {
-    return tabIdFromSender;
+  const normalizedTabId = normalizeRequestedTabId(tabIdFromSender);
+  if (normalizedTabId) {
+    return normalizedTabId;
   }
 
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   return tab?.id ?? null;
+}
+
+function normalizeRequestedTabId(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function normalizeRequestedWindowId(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+async function listSafariWindowsTabs() {
+  try {
+    const windows = await browser.windows.getAll({ populate: true });
+    const normalizedWindows = windows.map((window) => ({
+      windowId: window.id ?? null,
+      focused: window.focused === true,
+      state: String(window.state ?? ""),
+      tabCount: Array.isArray(window.tabs) ? window.tabs.length : 0,
+      tabs: (window.tabs ?? []).map((tab) => ({
+        tabId: tab.id ?? null,
+        windowId: tab.windowId ?? window.id ?? null,
+        index: tab.index ?? 0,
+        active: tab.active === true,
+        pinned: tab.pinned === true,
+        status: String(tab.status ?? ""),
+        title: String(tab.title ?? ""),
+        url: String(tab.url ?? ""),
+      })),
+    }));
+
+    return {
+      ok: true,
+      humanSummary: `已列出 ${normalizedWindows.length} 个 Safari 窗口。`,
+      data: {
+        windows: normalizedWindows,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorCode: "list_windows_failed",
+      humanSummary: `无法列出 Safari 标签页：${error.message}`,
+    };
+  }
+}
+
+async function getFrontmostTab() {
+  try {
+    const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab?.id) {
+      return {
+        ok: false,
+        errorCode: "tab_not_found",
+        humanSummary: "未找到前台标签页。",
+      };
+    }
+
+    return {
+      ok: true,
+      humanSummary: "已获取前台标签页。",
+      data: {
+        tab: {
+          tabId: tab.id,
+          windowId: tab.windowId ?? null,
+          index: tab.index ?? 0,
+          active: true,
+          pinned: tab.pinned === true,
+          status: String(tab.status ?? ""),
+          title: String(tab.title ?? ""),
+          url: String(tab.url ?? ""),
+        },
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorCode: "frontmost_tab_failed",
+      humanSummary: `无法获取前台标签页：${error.message}`,
+    };
+  }
+}
+
+async function activateSafariTab(tabId, windowId) {
+  if (!tabId) {
+    return {
+      ok: false,
+      errorCode: "missing_tab_id",
+      humanSummary: "缺少 tabId。",
+    };
+  }
+
+  try {
+    const updated = await browser.tabs.update(tabId, { active: true });
+    if (windowId) {
+      await browser.windows.update(windowId, { focused: true }).catch(() => {});
+    } else if (updated?.windowId) {
+      await browser.windows.update(updated.windowId, { focused: true }).catch(() => {});
+    }
+
+    return {
+      ok: true,
+      humanSummary: "已切换到目标标签页。",
+      data: {
+        tabId: updated?.id ?? tabId,
+        windowId: updated?.windowId ?? windowId ?? null,
+        title: String(updated?.title ?? ""),
+        url: String(updated?.url ?? ""),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorCode: "activate_tab_failed",
+      humanSummary: `无法切换标签页：${error.message}`,
+    };
+  }
+}
+
+async function openSafariTab({ url, windowId, active }) {
+  const normalizedURL = String(url ?? "").trim();
+  if (!normalizedURL) {
+    return {
+      ok: false,
+      errorCode: "missing_url",
+      humanSummary: "缺少 URL。",
+    };
+  }
+
+  try {
+    const tab = await browser.tabs.create({
+      url: normalizedURL,
+      active: active !== false,
+      ...(windowId ? { windowId } : {}),
+    });
+
+    return {
+      ok: true,
+      humanSummary: "已打开新标签页。",
+      data: {
+        tabId: tab?.id ?? null,
+        windowId: tab?.windowId ?? windowId ?? null,
+        title: String(tab?.title ?? ""),
+        url: String(tab?.url ?? normalizedURL),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorCode: "open_tab_failed",
+      humanSummary: `无法打开标签页：${error.message}`,
+    };
+  }
+}
+
+async function closeSafariTab(tabId) {
+  if (!tabId) {
+    return {
+      ok: false,
+      errorCode: "missing_tab_id",
+      humanSummary: "缺少 tabId。",
+    };
+  }
+
+  try {
+    await browser.tabs.remove(tabId);
+    return {
+      ok: true,
+      humanSummary: "已关闭目标标签页。",
+      data: {
+        tabId,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorCode: "close_tab_failed",
+      humanSummary: `无法关闭标签页：${error.message}`,
+    };
+  }
+}
+
+async function navigateSafariTab({ tabId, url, active }) {
+  const normalizedURL = String(url ?? "").trim();
+  if (!tabId) {
+    return {
+      ok: false,
+      errorCode: "missing_tab_id",
+      humanSummary: "缺少 tabId。",
+    };
+  }
+  if (!normalizedURL) {
+    return {
+      ok: false,
+      errorCode: "missing_url",
+      humanSummary: "缺少 URL。",
+    };
+  }
+
+  try {
+    const updated = await browser.tabs.update(tabId, {
+      url: normalizedURL,
+      ...(active === false ? {} : { active: true }),
+    });
+    return {
+      ok: true,
+      humanSummary: "已请求目标标签页导航。",
+      data: {
+        tabId: updated?.id ?? tabId,
+        windowId: updated?.windowId ?? null,
+        title: String(updated?.title ?? ""),
+        url: String(updated?.url ?? normalizedURL),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorCode: "navigate_tab_failed",
+      humanSummary: `无法导航标签页：${error.message}`,
+    };
+  }
 }
 
 async function requestFocusedInputPreparation(tabId) {

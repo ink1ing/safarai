@@ -360,6 +360,80 @@ html *:not(button):not(select):not(option):not(svg):not(path) {
     white-space: pre-wrap;
 }
 
+.agent-run-card {
+    margin-top: 2px;
+    padding: 12px;
+    border: 1px solid var(--control-border);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.agent-run-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.agent-run-title {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.agent-run-status {
+    color: var(--primary);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.agent-step-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.agent-step-item {
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid var(--control-border-soft);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.agent-step-item[data-status="failed"] {
+    border-color: rgba(255, 95, 87, 0.32);
+    background: rgba(255, 95, 87, 0.08);
+}
+
+.agent-step-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.agent-step-title {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.agent-step-meta {
+    color: var(--text-muted);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.agent-step-detail,
+.agent-step-preview {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .date-pill {
     width: fit-content;
     margin: 0 auto 24px;

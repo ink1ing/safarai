@@ -12,6 +12,10 @@ const agentApprovalCard = document.getElementById("agent-approval-card");
 const agentApprovalPreview = document.getElementById("agent-approval-preview");
 const agentApproveButton = document.getElementById("agent-approve-button");
 const agentRejectButton = document.getElementById("agent-reject-button");
+const agentRunCard = document.getElementById("agent-run-card");
+const agentRunTitle = document.getElementById("agent-run-title");
+const agentRunStatus = document.getElementById("agent-run-status");
+const agentStepList = document.getElementById("agent-step-list");
 const attachmentInput = document.getElementById("attachment-input");
 const attachmentButton = document.getElementById("attachment-button");
 const attachmentList = document.getElementById("attachment-list");
@@ -1222,7 +1226,91 @@ function renderAgentState(agent) {
   if (pendingApproval) {
     agentApprovalPreview.textContent = String(pendingApproval.previewText || pendingApproval.toolName || "");
   }
-  agentCancelButton.classList.toggle("is-hidden", !(agentStatus === "planning" || agentStatus === "executing" || agentStatus === "awaiting_approval"));
+  agentCancelButton.classList.toggle("is-hidden", !(agentStatus === "planning" || agentStatus === "executing" || agentStatus === "awaiting_approval" || agentStatus === "running_script"));
+
+  const steps = Array.isArray(agent?.steps) ? agent.steps : [];
+  const shouldShowAgentCard = !!agent && (steps.length > 0 || agentStatus || agent?.error || agent?.finalAnswer);
+  agentRunCard.classList.toggle("is-hidden", !shouldShowAgentCard);
+  if (!shouldShowAgentCard) {
+    agentRunStatus.textContent = "";
+    agentStepList.innerHTML = "";
+    return;
+  }
+
+  agentRunTitle.textContent = currentLanguage() === "zh" ? "Agent 执行轨迹" : "Agent Activity";
+  agentRunStatus.textContent = formatAgentStatus(agentStatus, agent?.error);
+  renderAgentSteps(steps, agent);
+}
+
+function formatAgentStatus(status, error) {
+  if (error) {
+    return currentLanguage() === "zh" ? "失败" : "Failed";
+  }
+
+  switch (status) {
+    case "planning":
+      return currentLanguage() === "zh" ? "规划中" : "Planning";
+    case "executing":
+      return currentLanguage() === "zh" ? "执行中" : "Running";
+    case "running_script":
+      return currentLanguage() === "zh" ? "脚本中" : "Script";
+    case "done":
+      return currentLanguage() === "zh" ? "已完成" : "Done";
+    case "failed":
+      return currentLanguage() === "zh" ? "失败" : "Failed";
+    case "canceled":
+      return currentLanguage() === "zh" ? "已取消" : "Canceled";
+    default:
+      return status || "";
+  }
+}
+
+function renderAgentSteps(steps, agent) {
+  agentStepList.innerHTML = "";
+
+  const recentSteps = steps.slice(-8);
+  for (const step of recentSteps) {
+    const item = document.createElement("div");
+    item.className = "agent-step-item";
+    item.dataset.status = String(step?.status || "");
+    const metaParts = [];
+    if (step?.toolName) {
+      metaParts.push(step.toolName);
+    }
+    if (Number.isFinite(Number(step?.tabId))) {
+      metaParts.push(`tab ${step.tabId}`);
+    }
+    if (Number.isFinite(Number(step?.durationMs))) {
+      metaParts.push(`${step.durationMs}ms`);
+    }
+
+    const preview = [step?.stdoutPreview, step?.stderrPreview]
+      .filter((value) => typeof value === "string" && value.trim())
+      .join("\n");
+
+    item.innerHTML = `
+      <div class="agent-step-top">
+        <div class="agent-step-title">${escapeHtml(step?.title || step?.toolName || "step")}</div>
+        <div class="agent-step-meta">${escapeHtml(metaParts.join(" · "))}</div>
+      </div>
+      <div class="agent-step-detail">${escapeHtml(step?.detail || "")}</div>
+      ${preview ? `<div class="agent-step-preview">${escapeHtml(preview)}</div>` : ""}
+    `;
+    agentStepList.appendChild(item);
+  }
+
+  if (agent?.error) {
+    const errorItem = document.createElement("div");
+    errorItem.className = "agent-step-item";
+    errorItem.dataset.status = "failed";
+    errorItem.innerHTML = `
+      <div class="agent-step-top">
+        <div class="agent-step-title">${currentLanguage() === "zh" ? "错误" : "Error"}</div>
+      </div>
+      <div class="agent-step-detail">${escapeHtml(String(agent.error || ""))}</div>
+    `;
+    agentStepList.appendChild(errorItem);
+  }
 }
 
 function normalizeVisualValue(value) {
