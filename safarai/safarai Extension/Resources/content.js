@@ -5,13 +5,16 @@ let latestInteractiveTargets = [];
 let lastStableSelection = "";
 let lastStableSelectionURL = window.location.href;
 let contextSyncTimer = null;
+let bootstrapSyncToken = 0;
+let bootstrapSyncTimers = [];
 const sharedModulesPromise = loadSharedModules();
+const BOOTSTRAP_SYNC_DELAYS = [0, 180, 600, 1400, 2600, 4200];
 
 patchHistoryMethods();
 observeVisualChanges();
 observeSystemAppearance();
 
-queueContextSync();
+scheduleBootstrapSync("startup");
 
 browser.runtime.onMessage.addListener((message) => {
   switch (message?.type) {
@@ -27,6 +30,9 @@ browser.runtime.onMessage.addListener((message) => {
       return handleInteractiveTargetCommand("focus", message.payload);
     case "content:scroll-to-target":
       return handleInteractiveTargetCommand("scroll", message.payload);
+    case "content:trigger-sync":
+      scheduleBootstrapSync("background-trigger");
+      return handleGetPageContext();
     default:
       return undefined;
   }
@@ -50,24 +56,36 @@ document.addEventListener("keyup", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
-    queueContextSync();
+    scheduleBootstrapSync("visibilitychange");
   }
 });
 
 window.addEventListener("focus", () => {
-  queueContextSync();
+  scheduleBootstrapSync("focus");
 });
 
 window.addEventListener("popstate", () => {
-  queueContextSync();
+  scheduleBootstrapSync("popstate");
 });
 
 window.addEventListener("hashchange", () => {
-  queueContextSync();
+  scheduleBootstrapSync("hashchange");
 });
 
 document.addEventListener("yt-navigate-finish", () => {
-  queueContextSync();
+  scheduleBootstrapSync("yt-navigate-finish");
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  scheduleBootstrapSync("domcontentloaded");
+});
+
+window.addEventListener("load", () => {
+  scheduleBootstrapSync("load");
+});
+
+window.addEventListener("pageshow", () => {
+  scheduleBootstrapSync("pageshow");
 });
 
 setInterval(() => {
@@ -75,7 +93,7 @@ setInterval(() => {
     lastKnownURL = window.location.href;
     lastStableSelection = "";
     lastStableSelectionURL = window.location.href;
-    queueContextSync();
+    scheduleBootstrapSync("url-poll");
   }
 }, 1000);
 
@@ -251,6 +269,28 @@ function queueContextSync() {
   }, 120);
 }
 
+function scheduleBootstrapSync(_reason = "") {
+  bootstrapSyncToken += 1;
+  const activeToken = bootstrapSyncToken;
+  clearBootstrapSyncTimers();
+
+  bootstrapSyncTimers = BOOTSTRAP_SYNC_DELAYS.map((delay) =>
+    setTimeout(() => {
+      if (activeToken !== bootstrapSyncToken) {
+        return;
+      }
+      queueContextSync();
+    }, delay)
+  );
+}
+
+function clearBootstrapSyncTimers() {
+  for (const timer of bootstrapSyncTimers) {
+    clearTimeout(timer);
+  }
+  bootstrapSyncTimers = [];
+}
+
 function syncStableSelection() {
   const selection = String(lastStableSelection || "").trim();
   if (!selection) {
@@ -275,7 +315,7 @@ function patchHistoryMethods() {
 
     window.history[methodName] = function (...args) {
       const result = original.apply(this, args);
-      queueContextSync();
+      scheduleBootstrapSync(`history:${methodName}`);
       return result;
     };
   };

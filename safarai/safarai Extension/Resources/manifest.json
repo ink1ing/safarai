@@ -40,6 +40,7 @@
         "activeTab",
         "contextMenus",
         "nativeMessaging",
+        "scripting",
         "storage",
         "tabs"
     ]

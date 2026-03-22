@@ -8,14 +8,18 @@ import { appendLog, loadLogs } from "./log-store.js";
 import { loadSession, saveSession } from "./session-store.js";
 
 const TAB_STATE = new Map();
+const TAB_RESYNC_TIMERS = new Map();
+const TAB_SYNC_RETRY_DELAYS = [120, 420, 1000, 2200, 4200, 7000];
 const SELECTION_CONTEXT_MENU_ID = "ask-selected-text";
 
 browser.runtime.onInstalled.addListener(() => {
   console.log("Safari AI background ready");
   createSelectionContextMenu();
+  injectContentScriptIntoOpenTabs().catch(() => {});
 });
 
 createSelectionContextMenu();
+injectContentScriptIntoOpenTabs().catch(() => {});
 
 setInterval(() => {
   syncActiveTabSnapshot().catch(() => {});
@@ -27,13 +31,8 @@ if (browser.tabs?.onUpdated) {
       return;
     }
 
-    const contextResult = await requestPageContext(tabId);
-    const context = contextResult.ok
-      ? contextResult.payload?.context ?? {}
-      : buildFallbackContext(tab);
-
-    TAB_STATE.set(tabId, mergeStableSelection(TAB_STATE.get(tabId), context, "tabs.onUpdated"));
-    await syncPanelState(tabId, TAB_STATE.get(tabId));
+    await syncTabContext(tabId, tab, "tabs.onUpdated");
+    scheduleTabContextResync(tabId, "tabs.onUpdated");
   });
 }
 
@@ -44,13 +43,8 @@ if (browser.tabs?.onActivated) {
       return;
     }
 
-    const contextResult = await requestPageContext(tab.id);
-    const context = contextResult.ok
-      ? contextResult.payload?.context ?? {}
-      : buildFallbackContext(tab);
-
-    TAB_STATE.set(tab.id, mergeStableSelection(TAB_STATE.get(tab.id), context, "tabs.onActivated"));
-    await syncPanelState(tab.id, TAB_STATE.get(tab.id));
+    await syncTabContext(tab.id, tab, "tabs.onActivated");
+    scheduleTabContextResync(tab.id, "tabs.onActivated");
   });
 }
 
@@ -170,13 +164,7 @@ async function syncActiveTabSnapshot() {
     return;
   }
 
-  const contextResult = await requestPageContext(tab.id);
-  const context = contextResult.ok
-    ? contextResult.payload?.context ?? buildFallbackContext(tab)
-    : buildFallbackContext(tab);
-
-  TAB_STATE.set(tab.id, mergeStableSelection(TAB_STATE.get(tab.id), context, "syncActiveTabSnapshot"));
-  await syncPanelState(tab.id, TAB_STATE.get(tab.id));
+  await syncTabContext(tab.id, tab, "syncActiveTabSnapshot");
 }
 
 async function syncPanelStateFromContent(tabId, context) {
@@ -206,6 +194,7 @@ async function syncPanelStateFromContent(tabId, context) {
       "content:page-updated"
     )
   );
+  cancelScheduledTabResync(resolvedTabId);
   await syncPanelState(resolvedTabId, TAB_STATE.get(resolvedTabId));
   return createSuccessResponse({ synced: true });
 }
@@ -585,7 +574,8 @@ async function requestFocusedInputPreparation(tabId) {
   }
 }
 
-async function requestPageContext(tabId) {
+async function requestPageContext(tabId, options = {}) {
+  const allowInjection = options.allowInjection !== false;
   const tab = await browser.tabs.get(tabId).catch(() => null);
   const cachedContext = TAB_STATE.get(tabId) ?? null;
 
@@ -595,6 +585,14 @@ async function requestPageContext(tabId) {
     });
 
     if (!response?.ok) {
+      const probedContext = await probePageContextDirectly(tabId, tab);
+      if (probedContext) {
+        return createSuccessResponse({
+          context: probedContext,
+          degraded: true,
+        });
+      }
+
       return createSuccessResponse(
         buildDegradedContextPayload(
           tab,
@@ -607,6 +605,14 @@ async function requestPageContext(tabId) {
 
     const context = response.payload?.context;
     if (!context) {
+      const probedContext = await probePageContextDirectly(tabId, tab);
+      if (probedContext) {
+        return createSuccessResponse({
+          context: probedContext,
+          degraded: true,
+        });
+      }
+
       return createSuccessResponse(
         buildDegradedContextPayload(
           tab,
@@ -632,6 +638,22 @@ async function requestPageContext(tabId) {
       },
     });
   } catch (error) {
+    const probedContext = await probePageContextDirectly(tabId, tab);
+    if (probedContext) {
+      return createSuccessResponse({
+        context: probedContext,
+        degraded: true,
+      });
+    }
+
+    if (allowInjection) {
+      const injected = await ensureContentScriptInjected(tabId);
+      if (injected) {
+        await delay(140);
+        return requestPageContext(tabId, { allowInjection: false });
+      }
+    }
+
     return createSuccessResponse(
       buildDegradedContextPayload(
         tab,
@@ -641,6 +663,318 @@ async function requestPageContext(tabId) {
       )
     );
   }
+}
+
+async function ensureContentScriptInjected(tabId) {
+  if (!tabId) {
+    return false;
+  }
+
+  try {
+    if (browser.scripting?.executeScript) {
+      await browser.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"],
+      });
+      return true;
+    }
+  } catch {
+    // Fall through to legacy injection path.
+  }
+
+  try {
+    if (browser.tabs?.executeScript) {
+      await browser.tabs.executeScript(tabId, {
+        file: "content.js",
+      });
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+async function injectContentScriptIntoOpenTabs() {
+  const tabs = await browser.tabs.query({}).catch(() => []);
+  for (const tab of tabs) {
+    const tabId = tab?.id ?? null;
+    const url = String(tab?.url ?? "");
+    if (!tabId || !isInjectableURL(url)) {
+      continue;
+    }
+    ensureContentScriptInjected(tabId).catch(() => {});
+  }
+}
+
+function isInjectableURL(url) {
+  return /^https?:\/\//i.test(String(url || ""));
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function probePageContextDirectly(tabId, tab) {
+  if (!tabId) {
+    return null;
+  }
+
+  try {
+    if (browser.scripting?.executeScript) {
+      const results = await browser.scripting.executeScript({
+        target: { tabId },
+        func: directPageContextProbe,
+      });
+      const payload = results?.[0]?.result ?? null;
+      return normalizeDirectProbePayload(payload, tab);
+    }
+  } catch {
+    // Fall through to legacy executeScript path.
+  }
+
+  try {
+    if (browser.tabs?.executeScript) {
+      const code = `(${directPageContextProbe.toString()})()`;
+      const results = await browser.tabs.executeScript(tabId, {
+        code,
+      });
+      const payload = Array.isArray(results) ? results[0] : null;
+      return normalizeDirectProbePayload(payload, tab);
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizeDirectProbePayload(payload, tab) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const metadata = payload.metadata ?? {};
+  return {
+    site: isSupportedSite(payload.site) ? payload.site : "unsupported",
+    url: String(payload.url ?? tab?.url ?? ""),
+    title: String(payload.title ?? tab?.title ?? "当前页面"),
+    selection: String(payload.selection ?? ""),
+    articleText: String(payload.articleText ?? ""),
+    structureSummary: "",
+    interactiveSummary: "",
+    interactiveTargets: [],
+    focusedInput: null,
+    metadata: {
+      domain: String(metadata.domain ?? ""),
+      pageKind: String(metadata.pageKind ?? "page"),
+      contentStrategy: "direct_visual_probe",
+      pageBackgroundColor: String(metadata.pageBackgroundColor ?? ""),
+      pageBackgroundImage: String(metadata.pageBackgroundImage ?? "none"),
+      pageColorScheme: String(metadata.pageColorScheme ?? ""),
+      pageBackgroundSource: String(metadata.pageBackgroundSource ?? "direct_probe"),
+      pageContextTransport: "direct_execute_script",
+      pageContextUpdatedAt: new Date().toISOString(),
+      pageContextFallbackReason: "",
+      pageContextError: "",
+      headingCount: "0",
+      interactiveCount: "0",
+      tableCount: "0",
+      codeBlockCount: "0",
+      hasIframes: "false",
+      hasShadowHosts: "false",
+    },
+  };
+}
+
+function directPageContextProbe() {
+  const hostname = window.location.hostname || "";
+  const pathname = window.location.pathname || "";
+  const title = document.title || "Untitled";
+  const selection = String(window.getSelection?.()?.toString?.() ?? "").trim();
+  const mainText =
+    normalizeDirectText(document.querySelector("main")?.innerText) ||
+    normalizeDirectText(document.querySelector("article")?.innerText) ||
+    "";
+  const visual = extractDirectVisualState();
+
+  return {
+    site: detectDirectSite(hostname),
+    url: window.location.href,
+    title,
+    selection,
+    articleText: mainText || `title: ${title}\nurl: ${window.location.href}`,
+    metadata: {
+      domain: hostname,
+      pageKind: inferDirectPageKind(hostname, pathname),
+      pageBackgroundColor: visual.backgroundColor,
+      pageBackgroundImage: visual.backgroundImage,
+      pageColorScheme: visual.colorScheme,
+      pageBackgroundSource: visual.source,
+    },
+  };
+
+  function extractDirectVisualState() {
+    const candidates = [
+      document.querySelector("[data-testid='primaryColumn']"),
+      document.querySelector("main"),
+      document.querySelector("article"),
+      document.body,
+      document.documentElement,
+    ].filter(Boolean);
+
+    let fallbackImage = "none";
+    let fallbackScheme = "";
+
+    for (const candidate of candidates) {
+      let current = candidate;
+      while (current) {
+        const computedStyle = getComputedStyle(current);
+        const backgroundImage = String(computedStyle.backgroundImage || "").trim() || "none";
+        const backgroundColor = String(computedStyle.backgroundColor || "").trim();
+        const colorScheme = normalizeColorScheme(computedStyle.colorScheme);
+
+        if (!fallbackScheme && colorScheme) {
+          fallbackScheme = colorScheme;
+        }
+        if (fallbackImage === "none" && backgroundImage !== "none") {
+          fallbackImage = backgroundImage;
+        }
+        if (backgroundColor && !isTransparent(backgroundColor)) {
+          return {
+            backgroundColor,
+            backgroundImage: backgroundImage !== "none" ? backgroundImage : fallbackImage,
+            colorScheme: colorScheme || fallbackScheme || inferSchemeFromColor(backgroundColor),
+            source: describeNode(current),
+          };
+        }
+        current = current.parentElement;
+      }
+    }
+
+    const fallbackColor = fallbackScheme === "light" ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)";
+    return {
+      backgroundColor: fallbackColor,
+      backgroundImage: fallbackImage,
+      colorScheme: fallbackScheme || inferSchemeFromColor(fallbackColor),
+      source: "direct_probe_fallback",
+    };
+  }
+
+  function detectDirectSite(currentHostname) {
+    if (currentHostname.includes("github.com")) return "github";
+    if (currentHostname.includes("mail.google.com")) return "gmail";
+    if (currentHostname === "x.com" || currentHostname.endsWith(".x.com") || currentHostname.includes("twitter.com")) {
+      return "x";
+    }
+    if (currentHostname.includes("mail.yahoo.com")) return "yahoo_mail";
+    return "unsupported";
+  }
+
+  function inferDirectPageKind(currentHostname, currentPathname) {
+    const site = detectDirectSite(currentHostname);
+    if (site === "x") {
+      if (/\/status\/\d+/.test(currentPathname)) return "x_post";
+      if (currentPathname === "/home") return "x_home";
+    }
+    return "page";
+  }
+
+  function normalizeDirectText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
+  }
+
+  function describeNode(node) {
+    if (!node) return "unknown";
+    const tag = String(node.tagName || "").toLowerCase() || "unknown";
+    const id = node.id ? `#${node.id}` : "";
+    return `${tag}${id}`;
+  }
+
+  function normalizeColorScheme(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized.includes("dark") && !normalized.includes("light")) return "dark";
+    if (normalized.includes("light") && !normalized.includes("dark")) return "light";
+    return "";
+  }
+
+  function isTransparent(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    return !normalized || normalized === "transparent" || normalized === "rgba(0, 0, 0, 0)";
+  }
+
+  function inferSchemeFromColor(value) {
+    const match = String(value || "")
+      .trim()
+      .toLowerCase()
+      .match(/^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)/);
+    if (!match) {
+      return "dark";
+    }
+    const red = Number.parseFloat(match[1]);
+    const green = Number.parseFloat(match[2]);
+    const blue = Number.parseFloat(match[3]);
+    const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+    return luminance >= 0.6 ? "light" : "dark";
+  }
+}
+
+async function syncTabContext(tabId, tab, source = "") {
+  triggerContentSync(tabId).catch(() => {});
+  const contextResult = await requestPageContext(tabId);
+  const context = contextResult.ok
+    ? contextResult.payload?.context ?? buildFallbackContext(tab)
+    : buildFallbackContext(tab);
+
+  TAB_STATE.set(tabId, mergeStableSelection(TAB_STATE.get(tabId), context, source));
+  await syncPanelState(tabId, TAB_STATE.get(tabId));
+  return contextResult;
+}
+
+async function triggerContentSync(tabId) {
+  if (!tabId) {
+    return;
+  }
+
+  try {
+    await browser.tabs.sendMessage(tabId, {
+      type: "content:trigger-sync",
+    });
+  } catch {
+    // Ignore unreachable tabs; scheduled retries will handle late injections.
+  }
+}
+
+function scheduleTabContextResync(tabId, source = "") {
+  cancelScheduledTabResync(tabId);
+
+  const timers = TAB_SYNC_RETRY_DELAYS.map((delay) =>
+    setTimeout(async () => {
+      const activeTab = await browser.tabs.get(tabId).catch(() => null);
+      if (!activeTab?.id) {
+        cancelScheduledTabResync(tabId);
+        return;
+      }
+
+      const result = await syncTabContext(tabId, activeTab, `${source}:retry_${delay}`);
+      const transport = result.payload?.context?.metadata?.pageContextTransport ?? "";
+      const pageKind = result.payload?.context?.metadata?.pageKind ?? "";
+      if (transport === "content_script" || transport === "content_event" || pageKind !== "fallback_tab_context") {
+        cancelScheduledTabResync(tabId);
+      }
+    }, delay)
+  );
+
+  TAB_RESYNC_TIMERS.set(tabId, timers);
+}
+
+function cancelScheduledTabResync(tabId) {
+  const timers = TAB_RESYNC_TIMERS.get(tabId) ?? [];
+  for (const timer of timers) {
+    clearTimeout(timer);
+  }
+  TAB_RESYNC_TIMERS.delete(tabId);
 }
 
 function buildDegradedContextPayload(tab, cachedContext, reason, errorMessage) {
