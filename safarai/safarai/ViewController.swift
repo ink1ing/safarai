@@ -17,6 +17,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private var panelRefreshTimer: Timer?
     private var responseTask: Task<Void, Never>?
+    private var safariWindowFollower: SafariWindowFollower?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -44,7 +45,25 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 autosaveName: "MainChatWindow",
                 placementMode: loadPlacementMode()
             )
+            if safariWindowFollower == nil {
+                safariWindowFollower = SafariWindowFollower(
+                    window: window,
+                    autosaveName: "MainChatWindow",
+                    placementModeProvider: { [weak self] in
+                        self?.loadPlacementMode() ?? .remember
+                    },
+                    followEnabledProvider: { [weak self] in
+                        self?.loadFollowSafariWindow() ?? true
+                    }
+                )
+            }
+            safariWindowFollower?.start()
         }
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        safariWindowFollower?.stop()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -132,6 +151,14 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     showStatusInfo: body["showStatusInfo"] as? Bool
                 )
                 pushPanelState(status: "显示选项已更新。")
+            } catch {
+                pushError(error.localizedDescription)
+            }
+        case "save-follow-safari-window-settings":
+            do {
+                try saveFollowSafariWindowSetting(body["followSafariWindow"] as? Bool)
+                pushPanelState(status: "Safari 跟随吸附已更新。")
+                safariWindowFollower?.refreshMode()
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -517,6 +544,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "theme": loadTheme(),
             "showPageInfo": loadShowPageInfo(),
             "showStatusInfo": loadShowStatusInfo(),
+            "followSafariWindow": loadFollowSafariWindow(),
             "customSystemPrompt": loadCustomSystemPrompt(),
             "settingsStatus": jsonValue(status ?? snapshot?.status)
         ]
@@ -600,6 +628,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 placementMode: loadPlacementMode(),
                 animated: true
             )
+            safariWindowFollower?.refreshMode()
         }
     }
 
@@ -626,6 +655,12 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private func saveCustomSystemPrompt(_ rawValue: String?) throws {
         var payload = normalizedUISettings(loadUISettings())
         payload["custom_system_prompt"] = normalizeCustomSystemPrompt(rawValue)
+        try writeUISettings(payload)
+    }
+
+    private func saveFollowSafariWindowSetting(_ rawValue: Bool?) throws {
+        var payload = normalizedUISettings(loadUISettings())
+        payload["follow_safari_window"] = rawValue ?? true
         try writeUISettings(payload)
     }
 
@@ -667,6 +702,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private func loadCustomSystemPrompt() -> String {
         normalizedUISettings(loadUISettings())["custom_system_prompt"] as? String ?? ""
+    }
+
+    private func loadFollowSafariWindow() -> Bool {
+        normalizedUISettings(loadUISettings())["follow_safari_window"] as? Bool ?? true
     }
 
     private func resolvedActiveProvider(
@@ -764,6 +803,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "theme": normalizedTheme(payload["theme"] as? String),
             "show_page_info": payload["show_page_info"] as? Bool ?? true,
             "show_status_info": payload["show_status_info"] as? Bool ?? true,
+            "follow_safari_window": payload["follow_safari_window"] as? Bool ?? true,
             "custom_system_prompt": normalizeCustomSystemPrompt(payload["custom_system_prompt"] as? String)
         ]
     }

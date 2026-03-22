@@ -3,15 +3,8 @@ const modelDisplay = document.getElementById("model-display");
 const conversationList = document.getElementById("conversation-list");
 const conversationStatus = document.getElementById("conversation-status");
 const contextURL = document.getElementById("context-url");
-const contextSelectionIndicator = document.getElementById(
-  "context-selection-indicator",
-);
+const contextSelectionText = document.getElementById("context-selection-text");
 const composerDivider = document.getElementById("composer-divider");
-const selectionDebugBox = document.getElementById("selection-debug-box");
-const selectionDebugContent = document.getElementById("selection-debug-content");
-const selectionFocusRow = document.getElementById("selection-focus-row");
-const selectionFocusChip = document.getElementById("selection-focus-chip");
-const selectionExplainButton = document.getElementById("selection-explain-button");
 const questionEditor = document.getElementById("question-editor");
 const askPageButton = document.getElementById("ask-page");
 const refreshContextButton = document.getElementById("refresh-context-button");
@@ -30,8 +23,6 @@ let currentDrawerState = {
   customSystemPrompt: "",
 };
 let currentContext = null;
-let selectionFocusSignature = "";
-let selectionFocusEnabled = false;
 let systemPromptSavedValue = "";
 let systemPromptDirty = false;
 
@@ -79,22 +70,6 @@ settingsCloseButton.addEventListener("click", () => {
 refreshContextButton.addEventListener("click", () => {
   webkit.messageHandlers.controller.postMessage({
     command: "refresh-panel-context",
-  });
-});
-selectionFocusChip.addEventListener("click", () => {
-  if (!selectionFocusSignature) {
-    return;
-  }
-  selectionFocusEnabled = !selectionFocusEnabled;
-  renderSelectionFocus();
-});
-selectionExplainButton.addEventListener("click", () => {
-  const selectedFocus = getCurrentSelectionText();
-  if (!selectedFocus) {
-    return;
-  }
-  sendQuestion("请结合整个页面背景，着重解释当前选中的内容。", {
-    selectedFocus,
   });
 });
 systemPromptEditor.addEventListener("input", () => {
@@ -229,6 +204,12 @@ function sdToggleStatusInfo() {
   });
 }
 
+function sdToggleFollowSafariWindow() {
+  sdPost("save-follow-safari-window-settings", {
+    followSafariWindow: !currentDrawerState.followSafariWindow,
+  });
+}
+
 document
   .getElementById("sd-login-codex")
   .addEventListener("click", () => sdPost("start-codex-login"));
@@ -271,9 +252,11 @@ document
 document
   .getElementById("sd-toggle-status-info")
   .addEventListener("click", () => sdToggleStatusInfo());
+document
+  .getElementById("sd-follow-safari-window")
+  .addEventListener("click", () => sdToggleFollowSafariWindow());
 
 syncSystemPromptButtons();
-renderSelectionFocus();
 
 /**
  * Called by Swift (via renderPanelState) to sync drawer UI state.
@@ -286,6 +269,7 @@ function renderSettingsDrawerState(payload) {
     theme: payload.theme || "blue",
     showPageInfo: payload.showPageInfo !== false,
     showStatusInfo: payload.showStatusInfo !== false,
+    followSafariWindow: payload.followSafariWindow !== false,
     customSystemPrompt: payload.customSystemPrompt || "",
   };
   el("sd-codex-email").textContent = payload.codexEmail || "未登录";
@@ -320,6 +304,8 @@ function renderSettingsDrawerState(payload) {
     currentDrawerState.showPageInfo ? "true" : "false";
   el("sd-toggle-status-info").dataset.active =
     currentDrawerState.showStatusInfo ? "true" : "false";
+  el("sd-follow-safari-window").dataset.active =
+    currentDrawerState.followSafariWindow ? "true" : "false";
 
   el("sd-status").textContent =
     payload.settingsStatus && payload.settingsStatus !== "Ready"
@@ -399,9 +385,7 @@ function renderPanelState(payload) {
   askPageButton.disabled = !settings.isLoggedIn;
   refreshContextButton.disabled = false;
   settingsButton.disabled = false;
-  selectionExplainButton.disabled = !settings.isLoggedIn;
   syncAskButton();
-  syncSelectionFocusState(context);
 
   bindModels(
     settings.availableModels || [],
@@ -413,11 +397,11 @@ function renderPanelState(payload) {
   }
   contextURL.textContent = context?.url || "";
   contextPreviewURL.textContent = context?.url || "";
-  contextSelectionIndicator.classList.toggle(
-    "is-hidden",
-    !getCurrentSelectionText(),
-  );
-  renderSelectionDebug(context?.selectionDebug);
+  const currentSelectionText = getCurrentSelectionText();
+  contextSelectionText.textContent = currentSelectionText
+    ? `"${currentSelectionText}"`
+    : "";
+  contextSelectionText.classList.toggle("is-hidden", !currentSelectionText);
   conversationStatus.textContent =
     status || (messages.length ? `${messages.length} 条` : "Ready");
   applyVisibility(settings);
@@ -449,85 +433,17 @@ function syncAskButton() {
   askPageButton.innerHTML = isStreamingResponse ? STOP_ICON : SEND_ICON;
 }
 
-function syncSelectionFocusState(context) {
-  const signature = buildSelectionSignature(context);
-  if (!signature) {
-    selectionFocusSignature = "";
-    selectionFocusEnabled = false;
-    renderSelectionFocus();
-    return;
-  }
-
-  if (signature !== selectionFocusSignature) {
-    selectionFocusSignature = signature;
-    selectionFocusEnabled = true;
-  }
-
-  renderSelectionFocus();
-}
-
-function renderSelectionFocus() {
-  const selectionText = getCurrentSelectionText();
-  const visible = !!selectionFocusSignature && !!selectionText;
-  selectionFocusRow.classList.toggle("is-hidden", !visible);
-  if (!visible) {
-    selectionFocusChip.textContent = "";
-    selectionFocusChip.dataset.active = "false";
-    return;
-  }
-
-  selectionFocusChip.dataset.active = selectionFocusEnabled ? "true" : "false";
-  selectionFocusChip.textContent = `选中内容焦点 · ${truncate(selectionText, 42)}`;
-}
-
-function buildSelectionSignature(context) {
-  const url = String(context?.url || "").trim();
-  const selection = getCurrentSelectionText();
-  if (!url || !selection) {
-    return "";
-  }
-  return `${url}::${selection}`;
-}
-
 function getCurrentSelectionText() {
   return String(
     currentContext?.selectionFocusText || currentContext?.selection || "",
   ).trim();
 }
 
-function renderSelectionDebug(debugSelection) {
-  const debug = debugSelection || {};
-  const lines = [
-    `contentLiveSelection: ${formatDebugValue(debug.contentLiveSelection)}`,
-    `contentStableSelection: ${formatDebugValue(debug.contentStableSelection)}`,
-    `backgroundPreviousSelection: ${formatDebugValue(debug.backgroundPreviousSelection)}`,
-    `backgroundMergedSelection: ${formatDebugValue(debug.backgroundMergedSelection)}`,
-    `backgroundSelectionMessage: ${formatDebugValue(debug.backgroundSelectionMessage)}`,
-    `backgroundSource: ${formatDebugValue(debug.backgroundSource)}`,
-    `snapshotSelection: ${formatDebugValue(debug.snapshotSelection)}`,
-    `selectionIntent: ${formatDebugValue(debug.selectionIntent)}`,
-    `panelUsedSelection: ${formatDebugValue(getCurrentSelectionText())}`,
-  ];
-
-  selectionDebugContent.textContent = lines.join("\n");
-  selectionDebugBox.classList.remove("is-hidden");
-}
-
-function formatDebugValue(value) {
-  const text = String(value ?? "").trim();
-  return text || "<empty>";
-}
-
 function resolveSelectedFocus(options = {}) {
   if (typeof options.selectedFocus === "string") {
     return options.selectedFocus;
   }
-
-  if (selectionFocusEnabled) {
-    return getCurrentSelectionText();
-  }
-
-  return "";
+  return getCurrentSelectionText();
 }
 
 function syncSystemPromptEditor(value) {

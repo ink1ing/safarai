@@ -42,6 +42,21 @@ enum WindowPlacementCoordinator {
         snapToSide(window, mode: preferredSide, animated: animated)
     }
 
+    static func frameForFollowingSafari(
+        window: NSWindow,
+        mode: PlacementMode
+    ) -> NSRect? {
+        guard mode == .left || mode == .right else {
+            return nil
+        }
+
+        if let safariFrame = safariWindowFrame() {
+            return targetFrameBesideSafari(window: window, safariFrame: safariFrame, mode: mode)
+        }
+
+        return nil
+    }
+
     // MARK: - Core Snap Logic
 
     /// 统一的吸附实现：
@@ -63,6 +78,15 @@ enum WindowPlacementCoordinator {
         mode: PlacementMode,
         animated: Bool
     ) {
+        let targetFrame = targetFrameBesideSafari(window: window, safariFrame: safariFrame, mode: mode)
+        window.setFrame(targetFrame, display: true, animate: animated)
+    }
+
+    private static func targetFrameBesideSafari(
+        window: NSWindow,
+        safariFrame: CGRect,
+        mode: PlacementMode
+    ) -> NSRect {
         let screen = screenContaining(frame: safariFrame) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? safariFrame
         let topEdge = min(safariFrame.maxY, visibleFrame.maxY)
@@ -94,11 +118,7 @@ enum WindowPlacementCoordinator {
                             max: visibleFrame.maxX - width)
         let originY = rawOriginY
 
-        window.setFrame(
-            NSRect(x: originX, y: originY, width: width, height: height),
-            display: true,
-            animate: animated
-        )
+        return NSRect(x: originX, y: originY, width: width, height: height)
     }
 
     /// 找不到 Safari 时的 fallback：吸附到主屏幕左/右边缘，高度铺满可用区
@@ -195,8 +215,106 @@ enum WindowPlacementCoordinator {
     }
 }
 
+final class SafariWindowFollower {
+    private weak var window: NSWindow?
+    private var timer: Timer?
+    private var lastSafariFrame: CGRect?
+    private var lastAppliedFrame: CGRect?
+    private let autosaveName: String
+    private let placementModeProvider: () -> WindowPlacementCoordinator.PlacementMode
+    private let followEnabledProvider: () -> Bool
+
+    init(
+        window: NSWindow,
+        autosaveName: String,
+        placementModeProvider: @escaping () -> WindowPlacementCoordinator.PlacementMode,
+        followEnabledProvider: @escaping () -> Bool
+    ) {
+        self.window = window
+        self.autosaveName = autosaveName
+        self.placementModeProvider = placementModeProvider
+        self.followEnabledProvider = followEnabledProvider
+    }
+
+    func start() {
+        stop()
+        guard followEnabledProvider(), placementModeProvider() != .remember else { return }
+
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        tick()
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        lastSafariFrame = nil
+        lastAppliedFrame = nil
+    }
+
+    func refreshMode() {
+        start()
+    }
+
+    private func tick() {
+        guard let window else {
+            stop()
+            return
+        }
+
+        let placementMode = placementModeProvider()
+        guard followEnabledProvider(), placementMode == .left || placementMode == .right else {
+            stop()
+            return
+        }
+
+        guard let safariFrame = WindowPlacementCoordinator.safariWindowFrameForFollowing() else {
+            return
+        }
+
+        let safariDidMove = frameDidChange(lastSafariFrame, safariFrame)
+        if !safariDidMove {
+            return
+        }
+
+        lastSafariFrame = safariFrame
+
+        guard let targetFrame = WindowPlacementCoordinator.frameForFollowingSafari(
+            window: window,
+            mode: placementMode
+        ) else {
+            return
+        }
+
+        let targetCGRect = CGRect(x: targetFrame.origin.x, y: targetFrame.origin.y, width: targetFrame.size.width, height: targetFrame.size.height)
+        guard frameDidChange(lastAppliedFrame, targetCGRect) else {
+            return
+        }
+
+        UserDefaults.standard.removeObject(forKey: "NSWindow Frame \(autosaveName)")
+        window.setFrame(targetFrame, display: true, animate: false)
+        lastAppliedFrame = targetCGRect
+    }
+
+    private func frameDidChange(_ previous: CGRect?, _ next: CGRect) -> Bool {
+        guard let previous else { return true }
+        let threshold: CGFloat = 1.0
+        return abs(previous.origin.x - next.origin.x) > threshold ||
+            abs(previous.origin.y - next.origin.y) > threshold ||
+            abs(previous.size.width - next.size.width) > threshold ||
+            abs(previous.size.height - next.size.height) > threshold
+    }
+}
+
 // MARK: - CGRect helper
 
 private extension CGRect {
     var area: CGFloat { width * height }
+}
+
+private extension WindowPlacementCoordinator {
+    static func safariWindowFrameForFollowing() -> CGRect? {
+        safariWindowFrame()
+    }
 }

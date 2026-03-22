@@ -212,30 +212,24 @@
                                 </button>
                             </div>
                         </div>
+                        <div class="settings-section">
+                            <div class="settings-label">Safari 跟随吸附</div>
+                            <div class="settings-button-row">
+                                <button
+                                    class="settings-btn"
+                                    id="sd-follow-safari-window"
+                                    type="button"
+                                >
+                                    跟随 Safari
+                                </button>
+                            </div>
+                        </div>
                         <div class="settings-status" id="sd-status"></div>
                     </div>
                 </div>
 
                 <footer class="composer-shell glass-panel">
                     <div class="suggestion-row">
-                        <div
-                            id="selection-focus-row"
-                            class="selection-focus-row is-hidden"
-                        >
-                            <button
-                                id="selection-focus-chip"
-                                class="selection-focus-chip"
-                                type="button"
-                                data-active="true"
-                            ></button>
-                            <button
-                                id="selection-explain-button"
-                                class="selection-explain-button"
-                                type="button"
-                            >
-                                解释选中文字
-                            </button>
-                        </div>
                         <button
                             class="suggestion-pill"
                             type="button"
@@ -260,32 +254,16 @@
                     </div>
 
                     <div class="composer-card">
-                        <div class="context-header-row">
-                            <div id="context-url" class="context-url"></div>
-                            <div
-                                id="context-selection-indicator"
-                                class="context-selection-indicator is-hidden"
-                            >
-                                selected text
-                            </div>
-                        </div>
+                        <div id="context-url" class="context-url"></div>
+                        <div
+                            id="context-selection-text"
+                            class="context-selection-text is-hidden"
+                        ></div>
                         <div
                             id="composer-divider"
                             class="composer-divider"
                             aria-hidden="true"
                         ></div>
-                        <div
-                            id="selection-debug-box"
-                            class="selection-debug-box is-hidden"
-                        >
-                            <div class="selection-debug-title">
-                                selection debug
-                            </div>
-                            <pre
-                                id="selection-debug-content"
-                                class="selection-debug-content"
-                            ></pre>
-                        </div>
                         <textarea
                             id="question-editor"
                             rows="1"

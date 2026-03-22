@@ -3,6 +3,7 @@ import WebKit
 
 final class FloatingPanelController: NSWindowController, WKScriptMessageHandler {
     private let webView: WKWebView
+    private var safariWindowFollower: SafariWindowFollower?
 
     init() {
         let configuration = WKWebViewConfiguration()
@@ -43,6 +44,19 @@ final class FloatingPanelController: NSWindowController, WKScriptMessageHandler 
         )
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if let window, safariWindowFollower == nil {
+            safariWindowFollower = SafariWindowFollower(
+                window: window,
+                autosaveName: "FloatingChatPanel",
+                placementModeProvider: { [weak self] in
+                    self?.loadPlacementMode() ?? .remember
+                },
+                followEnabledProvider: { [weak self] in
+                    self?.loadFollowSafariWindow() ?? true
+                }
+            )
+        }
+        safariWindowFollower?.start()
         pushState()
     }
 
@@ -111,6 +125,17 @@ final class FloatingPanelController: NSWindowController, WKScriptMessageHandler 
             return .remember
         }
         return mode
+    }
+
+    private func loadFollowSafariWindow() -> Bool {
+        let url = SharedContainer.baseURL().appendingPathComponent("ui-settings.json")
+        guard
+            let data = try? Data(contentsOf: url),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return true
+        }
+        return payload["follow_safari_window"] as? Bool ?? true
     }
 }
 

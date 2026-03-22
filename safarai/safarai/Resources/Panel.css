@@ -270,7 +270,7 @@ body {
 .chat-scroll {
     flex: 1;
     overflow-y: auto;
-    padding: 16px 20px 220px;
+    padding: 16px 20px 20px;
 }
 
 .date-pill {
@@ -420,10 +420,8 @@ body {
 }
 
 .composer-shell {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
+    position: relative;
+    flex-shrink: 0;
     padding: 16px;
     border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
@@ -530,30 +528,13 @@ body {
     text-overflow: ellipsis;
 }
 
-.context-header-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    min-width: 0;
-}
-
-.context-header-row .context-url {
-    flex: 1;
-    min-width: 0;
-}
-
-.context-selection-indicator {
-    flex: 0 0 auto;
-    padding: 3px 8px;
-    border: 1px solid var(--primary-outline);
-    border-radius: 999px;
-    background: var(--primary-surface-soft);
-    color: var(--primary);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: lowercase;
+.context-selection-text {
+    color: rgba(224, 224, 230, 0.4);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .composer-divider {
@@ -565,33 +546,6 @@ body {
         rgba(255, 255, 255, 0.12) 86%,
         rgba(255, 255, 255, 0.03) 100%
     );
-}
-
-.selection-debug-box {
-    padding: 10px 12px;
-    border: 1px dashed rgba(255, 255, 255, 0.12);
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.03);
-}
-
-.selection-debug-title {
-    margin-bottom: 6px;
-    color: rgba(224, 224, 230, 0.55);
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-}
-
-.selection-debug-content {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: rgba(224, 224, 230, 0.72);
-    font:
-        11px/1.45 "SF Mono",
-        Menlo,
-        monospace;
 }
 
 #question-editor {
