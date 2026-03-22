@@ -20,6 +20,7 @@ let currentDrawerState = {
   theme: "blue",
   showPageInfo: true,
   showStatusInfo: true,
+  followSafariWindow: true,
   customSystemPrompt: "",
 };
 let currentContext = null;
