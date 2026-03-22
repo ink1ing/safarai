@@ -76,7 +76,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             }
 
             DispatchQueue.main.async {
-                self.pushPanelState(status: state.isEnabled ? "已连接 Safari 扩展" : "扩展未启用")
+                self.pushPanelState(
+                    status: state.isEnabled
+                        ? AppText.localized(en: "Safari extension connected.", zh: "已连接 Safari 扩展")
+                        : AppText.localized(en: "Safari extension is disabled.", zh: "扩展未启用")
+                )
             }
         }
     }
@@ -123,6 +127,34 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             saveSelectedModel(body)
         case "send-question":
             sendQuestion(body)
+        case "create-thread":
+            createThread()
+        case "load-thread":
+            if let threadID = body["threadId"] as? String {
+                loadThread(threadID)
+            }
+        case "rename-thread":
+            if let threadID = body["threadId"] as? String {
+                renameThread(threadID, title: body["title"] as? String)
+            }
+        case "prompt-rename-thread":
+            if let threadID = body["threadId"] as? String {
+                promptRenameThread(threadID)
+            }
+        case "toggle-pin-thread":
+            if let threadID = body["threadId"] as? String {
+                togglePinnedThread(threadID, isPinned: body["isPinned"] as? Bool)
+            }
+        case "delete-thread":
+            if let threadID = body["threadId"] as? String {
+                deleteThread(threadID)
+            }
+        case "confirm-delete-thread":
+            if let threadID = body["threadId"] as? String {
+                confirmDeleteThread(threadID)
+            }
+        case "list-threads":
+            pushPanelState()
         case "stop-response":
             stopCurrentResponse()
         case "refresh-panel-context":
@@ -142,25 +174,31 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             if let theme = body["theme"] as? String {
                 do {
                     try saveTheme(theme)
-                    pushPanelState(status: "颜色风格已更新。")
+                    pushPanelState(status: AppText.localized(en: "Theme updated.", zh: "颜色风格已更新。"))
+                } catch {
+                    pushError(error.localizedDescription)
+                }
+            }
+        case "save-language-settings":
+            if let language = body["language"] as? String {
+                do {
+                    try saveLanguage(language)
+                    pushPanelState(status: AppText.localized(en: "Language updated.", zh: "语言已更新。"))
                 } catch {
                     pushError(error.localizedDescription)
                 }
             }
         case "save-panel-visibility-settings":
             do {
-                try savePanelVisibilitySettings(
-                    showPageInfo: body["showPageInfo"] as? Bool,
-                    showStatusInfo: body["showStatusInfo"] as? Bool
-                )
-                pushPanelState(status: "显示选项已更新。")
+                try savePanelVisibilitySettings(showPageInfo: body["showPageInfo"] as? Bool)
+                pushPanelState(status: AppText.localized(en: "Display settings updated.", zh: "显示选项已更新。"))
             } catch {
                 pushError(error.localizedDescription)
             }
         case "save-follow-safari-window-settings":
             do {
                 try saveFollowSafariWindowSetting(body["followSafariWindow"] as? Bool)
-                pushPanelState(status: "Safari 跟随吸附已更新。")
+                pushPanelState(status: AppText.localized(en: "Safari follow mode updated.", zh: "Safari 跟随吸附已更新。"))
                 safariWindowFollower?.refreshMode()
             } catch {
                 pushError(error.localizedDescription)
@@ -168,10 +206,18 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         case "save-follow-page-color-settings":
             do {
                 try saveFollowPageColorSetting(body["followPageColor"] as? Bool)
-                pushPanelState(status: "页面颜色跟随已更新。")
+                pushPanelState(status: AppText.localized(en: "Page color sync updated.", zh: "页面颜色跟随已更新。"))
             } catch {
                 pushError(error.localizedDescription)
             }
+        case "change-history-storage-location":
+            changeHistoryStorageLocation()
+        case "reset-history-storage-location":
+            resetHistoryStorageLocation()
+        case "import-history-library":
+            importHistoryLibrary()
+        case "export-history-library":
+            exportHistoryLibrary()
         case "save-custom-system-prompt":
             do {
                 try saveCustomSystemPrompt(body["customSystemPrompt"] as? String)
@@ -199,12 +245,12 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func startCodexLogin() {
-        pushPanelState(status: "正在拉起 Codex 登录…")
+            pushPanelState(status: AppText.localized(en: "Starting Codex sign-in…", zh: "正在拉起 Codex 登录…"))
         Task {
             do {
                 let result = try await CodexOAuthService.shared.startLogin()
                 try? ProviderSettingsStore.saveActiveProvider(.codex)
-                pushPanelState(status: "Codex 登录成功，模型列表已同步。", configuration: result.configuration)
+                pushPanelState(status: AppText.localized(en: "Codex signed in. Models synced.", zh: "Codex 登录成功，模型列表已同步。"), configuration: result.configuration)
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -217,7 +263,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             if ProviderSettingsStore.loadActiveProvider() == .codex, ZedAccountStore.load() != nil {
                 try? ProviderSettingsStore.saveActiveProvider(.zed)
             }
-            pushPanelState(status: "已登出 Codex。")
+            pushPanelState(status: AppText.localized(en: "Signed out of Codex.", zh: "已登出 Codex。"))
         } catch {
             pushError(error.localizedDescription)
         }
@@ -225,11 +271,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private func refreshCodexModels() {
         guard let configuration = CodexAccountStore.load() else {
-            pushError("当前未登录 Codex。")
+            pushError(AppText.localized(en: "Not signed in to Codex.", zh: "当前未登录 Codex。"))
             return
         }
 
-        pushPanelState(status: "正在刷新模型列表…")
+        pushPanelState(status: AppText.localized(en: "Refreshing model list…", zh: "正在刷新模型列表…"))
         Task {
             do {
                 let refreshed = try await CodexOAuthService.shared.refreshIfNeeded(configuration)
@@ -241,7 +287,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     next.model.selected = models.first?.id ?? "gpt-5"
                 }
                 try CodexAccountStore.save(next)
-                pushPanelState(status: "模型列表已刷新。", configuration: next)
+                pushPanelState(status: AppText.localized(en: "Model list refreshed.", zh: "模型列表已刷新。"), configuration: next)
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -255,7 +301,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "medium"
 
         guard !selectedValue.isEmpty else {
-            pushError("请选择一个模型。")
+            pushError(AppText.localized(en: "Please choose a model.", zh: "请选择一个模型。"))
             return
         }
 
@@ -267,11 +313,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         switch selection.provider {
         case .zed:
             guard var configuration = ZedAccountStore.load() else {
-                pushError("当前未登录 Zed。")
+                pushError(AppText.localized(en: "Not signed in to Zed.", zh: "当前未登录 Zed。"))
                 return
             }
             guard configuration.model.available.contains(where: { $0.id == selection.modelID }) else {
-                pushError("所选模型在 Zed 模型列表中不存在。")
+                pushError(AppText.localized(en: "The selected model is not available in Zed.", zh: "所选模型在 Zed 模型列表中不存在。"))
                 return
             }
             configuration.model.selected = selection.modelID
@@ -279,18 +325,18 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 try ZedAccountStore.save(configuration)
                 try ProviderSettingsStore.saveActiveProvider(.zed)
                 try saveUISettings(reasoningEffort: reasoningEffort)
-                pushPanelState(status: "模型已保存。")
+                pushPanelState(status: AppText.localized(en: "Model saved.", zh: "模型已保存。"))
             } catch {
                 pushError(error.localizedDescription)
             }
 
         case .codex:
             guard var configuration = CodexAccountStore.load() else {
-                pushError("当前未登录 Codex。")
+                pushError(AppText.localized(en: "Not signed in to Codex.", zh: "当前未登录 Codex。"))
                 return
             }
             guard configuration.model.available.contains(where: { $0.id == selection.modelID }) else {
-                pushError("所选模型在 Codex 模型列表中不存在。")
+                pushError(AppText.localized(en: "The selected model is not available in Codex.", zh: "所选模型在 Codex 模型列表中不存在。"))
                 return
             }
             configuration.model.selected = selection.modelID
@@ -298,7 +344,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 try CodexAccountStore.save(configuration)
                 try ProviderSettingsStore.saveActiveProvider(.codex)
                 try saveUISettings(reasoningEffort: reasoningEffort)
-                pushPanelState(status: "模型已保存。", configuration: configuration)
+                pushPanelState(status: AppText.localized(en: "Model saved.", zh: "模型已保存。"), configuration: configuration)
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -306,7 +352,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func loginZed() {
-        pushPanelState(status: "正在从 Keychain 导入 Zed 账户…")
+        pushPanelState(status: AppText.localized(en: "Importing Zed account from Keychain…", zh: "正在从 Keychain 导入 Zed 账户…"))
         Task {
             do {
                 var config = try await ZedAccountStore.importFromKeychain()
@@ -318,7 +364,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 }
                 try ZedAccountStore.save(config)
                 try ProviderSettingsStore.saveActiveProvider(.zed)
-                pushPanelState(status: "Zed 登录成功，共 \(models.count) 个模型。")
+                pushPanelState(status: AppText.localized(en: "Zed signed in. \(models.count) models available.", zh: "Zed 登录成功，共 \(models.count) 个模型。"))
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -331,7 +377,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             if ProviderSettingsStore.loadActiveProvider() == .zed, CodexAccountStore.load() != nil {
                 try? ProviderSettingsStore.saveActiveProvider(.codex)
             }
-            pushPanelState(status: "已登出 Zed。")
+            pushPanelState(status: AppText.localized(en: "Signed out of Zed.", zh: "已登出 Zed。"))
         } catch {
             pushError(error.localizedDescription)
         }
@@ -339,10 +385,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private func refreshZedModels() {
         guard var config = ZedAccountStore.load() else {
-            pushError("当前未登录 Zed。")
+            pushError(AppText.localized(en: "Not signed in to Zed.", zh: "当前未登录 Zed。"))
             return
         }
-        pushPanelState(status: "正在刷新 Zed 模型列表…")
+        pushPanelState(status: AppText.localized(en: "Refreshing Zed models…", zh: "正在刷新 Zed 模型列表…"))
         Task {
             do {
                 let models = try await ZedResponseService.shared.fetchModels(configuration: config)
@@ -352,7 +398,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     config.model.selected = models.first!.id
                 }
                 try ZedAccountStore.save(config)
-                pushPanelState(status: "Zed 模型列表已刷新，共 \(models.count) 个。")
+                pushPanelState(status: AppText.localized(en: "Zed models refreshed: \(models.count).", zh: "Zed 模型列表已刷新，共 \(models.count) 个。"))
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -366,7 +412,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         do {
             try ProviderSettingsStore.saveActiveProvider(provider)
             let name = provider == .zed ? "Zed" : "Codex"
-            pushPanelState(status: "已切换到 \(name)。")
+            pushPanelState(status: AppText.localized(en: "Switched to \(name).", zh: "已切换到 \(name)。"))
         } catch {
             pushError(error.localizedDescription)
         }
@@ -383,18 +429,25 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         let selectedFocus = (body["selectedFocus"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !prompt.isEmpty else {
-            pushPanelState(status: "请输入问题。")
+            pushPanelState(status: AppText.localized(en: "Enter a question.", zh: "请输入问题。"))
             return
         }
 
         var snapshot = PanelStateStore.load()
-            ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+            ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        if snapshot.currentThreadId == nil {
+            let thread = try? ChatHistoryStore.createThread(context: snapshot.context)
+            snapshot.currentThreadId = thread?.id
+        }
         snapshot.messages.append(PanelConversationMessage(role: "user", kind: "question", text: prompt))
-        snapshot.status = "正在回答"
+        snapshot.status = AppText.localized(en: "Answering", zh: "正在回答")
         snapshot.updatedAt = Date().timeIntervalSince1970
+        if let synced = try? ChatHistoryStore.syncSnapshot(snapshot) {
+            snapshot = synced
+        }
         try? PanelStateStore.save(snapshot)
 
-        pushPanelState(status: "正在回答", snapshot: snapshot)
+        pushPanelState(status: AppText.localized(en: "Answering", zh: "正在回答"), snapshot: snapshot)
         evaluateRaw("beginStreamMessage()")
 
         let activeProvider = resolvedActiveProvider()
@@ -444,7 +497,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     self.finishResponse(
                         baseSnapshot: snapshot,
                         assistantText: accumulated,
-                        status: "已回答"
+                        status: AppText.localized(en: "Answered", zh: "已回答")
                     )
                 }
             } catch is CancellationError {
@@ -452,7 +505,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     self.finishResponse(
                         baseSnapshot: snapshot,
                         assistantText: accumulated,
-                        status: "已停止"
+                        status: AppText.localized(en: "Stopped", zh: "已停止")
                     )
                 }
             } catch {
@@ -470,11 +523,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func refreshPanelContext() {
-        pushPanelState(status: "正在刷新页面…")
+        pushPanelState(status: AppText.localized(en: "Refreshing page…", zh: "正在刷新页面…"))
         Task {
             if let latest = await SafariContextRefresher.loadFrontmostPage() {
                 var snapshot = PanelStateStore.load()
-                    ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+                    ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
                 let currentContext = snapshot.context
                 snapshot.context = PanelContextSnapshot(
                     site: currentContext?.site ?? "unsupported",
@@ -487,7 +540,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     metadata: currentContext?.metadata ?? [:],
                     visualSummary: currentContext?.visualSummary
                 )
-                snapshot.status = "页面已刷新"
+                snapshot.status = AppText.localized(en: "Page refreshed", zh: "页面已刷新")
                 snapshot.updatedAt = Date().timeIntervalSince1970
                 try? PanelStateStore.save(snapshot)
             }
@@ -499,7 +552,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             userInfo: nil
         ) { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                self?.pushPanelState(status: "页面已刷新")
+                self?.pushPanelState(status: AppText.localized(en: "Page refreshed", zh: "页面已刷新"))
             }
         }
     }
@@ -509,12 +562,15 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         configuration: CodexAccountConfiguration? = nil,
         snapshot: PanelStateSnapshot? = nil
     ) {
-        let snapshot = snapshot ?? PanelStateStore.load()
+        let baseSnapshot = snapshot ?? PanelStateStore.load()
+        let snapshot = ensureHistorySnapshot(baseSnapshot)
         let codexConfig = configuration ?? CodexAccountStore.load()
         let zedConfig = ZedAccountStore.load()
         let isLoggedIn = codexConfig != nil || zedConfig != nil
         let activeProvider = resolvedActiveProvider(codexConfig: codexConfig, zedConfig: zedConfig)
         let bothLoggedIn = codexConfig != nil && zedConfig != nil
+        let historyThreads = ChatHistoryStore.listThreads()
+        let historyStorageState = ChatHistoryStore.storageState()
         let selectionIntent = PanelStateStore.loadSelectionIntent(matchingURL: snapshot?.context?.url)
         let debugSelection = buildSelectionDebug(
             snapshotSelection: snapshot?.context?.selection,
@@ -550,12 +606,15 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "zedName": jsonValue(zedConfig?.account.name),
             "zedLoggedIn": zedConfig != nil,
             "activeProvider": activeProvider.rawValue,
+            "language": loadLanguage(),
             "placementMode": loadPlacementMode().rawValue,
             "theme": loadTheme(),
             "showPageInfo": loadShowPageInfo(),
-            "showStatusInfo": loadShowStatusInfo(),
             "followSafariWindow": loadFollowSafariWindow(),
             "followPageColor": loadFollowPageColor(),
+            "historyStoragePath": historyStorageState.displayPath,
+            "historyStorageStatus": historyStorageState.status,
+            "historyStorageUsesDefault": historyStorageState.usesDefault,
             "customSystemPrompt": loadCustomSystemPrompt(),
             "settingsStatus": jsonValue(status ?? snapshot?.status)
         ]
@@ -566,13 +625,30 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "selectedModel": selectedModel,
             "availableModels": availableModels,
             "activeProvider": activeProvider.rawValue,
+            "language": loadLanguage(),
             "showPageInfo": loadShowPageInfo(),
-            "showStatusInfo": loadShowStatusInfo(),
+            "historyStoragePath": historyStorageState.displayPath,
+            "historyStorageStatus": historyStorageState.status,
             "drawerState": drawerState
         ]
 
         let payload: [String: Any] = [
             "settings": settingsPayload,
+            "currentThreadId": jsonValue(snapshot?.currentThreadId),
+            "historyThreads": historyThreads.map {
+                [
+                    "id": $0.id,
+                    "title": $0.title,
+                    "isPinned": $0.isPinned,
+                    "createdAt": $0.createdAt,
+                    "updatedAt": $0.updatedAt,
+                    "sourcePageURL": $0.sourcePageURL,
+                    "sourcePageTitle": $0.sourcePageTitle,
+                    "messageCount": $0.messageCount
+                ]
+            },
+            "historyStoragePath": historyStorageState.displayPath,
+            "historyStorageStatus": historyStorageState.status,
             "context": [
                 "url": jsonValue(snapshot?.context?.url),
                 "title": jsonValue(snapshot?.context?.title),
@@ -607,6 +683,9 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
         next.status = status
         next.updatedAt = Date().timeIntervalSince1970
+        if let synced = try? ChatHistoryStore.syncSnapshot(next) {
+            next = synced
+        }
         try? PanelStateStore.save(next)
         evaluateRaw("finalizeStreamMessage()")
         responseTask = nil
@@ -615,12 +694,213 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private func pushError(_ message: String) {
         var snapshot = PanelStateStore.load()
-            ?? PanelStateSnapshot(context: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+            ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
         snapshot.messages.append(PanelConversationMessage(role: "error", kind: "error", text: message))
         snapshot.status = nil
         snapshot.updatedAt = Date().timeIntervalSince1970
+        if let synced = try? ChatHistoryStore.syncSnapshot(snapshot) {
+            snapshot = synced
+        }
         try? PanelStateStore.save(snapshot)
         pushPanelState()
+    }
+
+    private func createThread() {
+        if responseTask != nil {
+            stopCurrentResponse()
+        }
+
+        do {
+            let current = PanelStateStore.load()
+                ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+            let thread = try ChatHistoryStore.createThread(context: current.context)
+            let snapshot = PanelStateSnapshot(
+                context: current.context,
+                currentThreadId: thread.id,
+                messages: [],
+                status: nil,
+                updatedAt: Date().timeIntervalSince1970
+            )
+            try PanelStateStore.save(snapshot)
+            pushPanelState(status: AppText.localized(en: "New chat created.", zh: "已创建新对话。"), snapshot: snapshot)
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func loadThread(_ threadID: String) {
+        guard let record = ChatHistoryStore.loadThread(id: threadID) else {
+            pushError(AppText.localized(en: "Chat record not found.", zh: "未找到对应的聊天记录。"))
+            return
+        }
+
+        let current = PanelStateStore.load()
+            ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        let snapshot = PanelStateSnapshot(
+            context: current.context,
+            currentThreadId: record.id,
+            messages: record.messages,
+            status: AppText.localized(en: "Chat history loaded", zh: "已载入聊天记录"),
+            updatedAt: Date().timeIntervalSince1970
+        )
+        try? PanelStateStore.save(snapshot)
+        pushPanelState(status: AppText.localized(en: "Chat history loaded.", zh: "已载入聊天记录。"), snapshot: snapshot)
+    }
+
+    private func renameThread(_ threadID: String, title: String?) {
+        let normalizedTitle = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try ChatHistoryStore.renameThread(id: threadID, title: normalizedTitle)
+            pushPanelState(status: AppText.localized(en: "Chat renamed.", zh: "聊天记录已重命名。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func promptRenameThread(_ threadID: String) {
+        let alert = NSAlert()
+        alert.messageText = AppText.localized(en: "Rename chat", zh: "重命名聊天记录")
+        alert.informativeText = AppText.localized(en: "Enter a new title for this chat.", zh: "输入新的聊天记录标题。")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: AppText.localized(en: "Save", zh: "保存"))
+        alert.addButton(withTitle: AppText.localized(en: "Cancel", zh: "取消"))
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        if let record = ChatHistoryStore.loadThread(id: threadID) {
+            input.stringValue = record.title
+        }
+        alert.accessoryView = input
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            return
+        }
+        renameThread(threadID, title: input.stringValue)
+    }
+
+    private func togglePinnedThread(_ threadID: String, isPinned: Bool?) {
+        do {
+            try ChatHistoryStore.setPinned(id: threadID, isPinned: isPinned ?? false)
+            pushPanelState(status: (isPinned ?? false) ? AppText.localized(en: "Chat pinned.", zh: "已置顶聊天记录。") : AppText.localized(en: "Chat unpinned.", zh: "已取消置顶。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func deleteThread(_ threadID: String) {
+        do {
+            try ChatHistoryStore.deleteThread(id: threadID)
+            var snapshot = PanelStateStore.load()
+                ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+            if snapshot.currentThreadId == threadID {
+                snapshot.currentThreadId = nil
+                snapshot.messages = []
+                snapshot.status = nil
+                snapshot.updatedAt = Date().timeIntervalSince1970
+                try? PanelStateStore.save(snapshot)
+            }
+            pushPanelState(status: AppText.localized(en: "Chat deleted.", zh: "聊天记录已删除。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func confirmDeleteThread(_ threadID: String) {
+        let alert = NSAlert()
+        alert.messageText = AppText.localized(en: "Delete chat", zh: "删除聊天记录")
+        alert.informativeText = AppText.localized(en: "This action cannot be undone.", zh: "删除后不可恢复。")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: AppText.localized(en: "Delete", zh: "删除"))
+        alert.addButton(withTitle: AppText.localized(en: "Cancel", zh: "取消"))
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            return
+        }
+        deleteThread(threadID)
+    }
+
+    private func changeHistoryStorageLocation() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = AppText.localized(en: "Choose", zh: "选择")
+        panel.message = AppText.localized(en: "Choose a chat history storage location", zh: "选择聊天记录存储位置")
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            _ = try ChatHistoryStore.updateStorageLocation(to: url)
+            pushPanelState(status: AppText.localized(en: "Chat history location updated.", zh: "聊天记录位置已更新。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func resetHistoryStorageLocation() {
+        do {
+            _ = try ChatHistoryStore.resetStorageLocationToDefault()
+            pushPanelState(status: AppText.localized(en: "Default chat history location restored.", zh: "已恢复默认聊天记录位置。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func importHistoryLibrary() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = AppText.localized(en: "Import", zh: "导入")
+        panel.message = AppText.localized(en: "Choose a chat history folder to import", zh: "选择要导入的聊天记录目录")
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            try ChatHistoryStore.importLibrary(from: url)
+            pushPanelState(status: AppText.localized(en: "Chat history imported.", zh: "聊天记录已导入。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func exportHistoryLibrary() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = AppText.localized(en: "Export", zh: "导出")
+        panel.message = AppText.localized(en: "Choose an export folder", zh: "选择导出目录")
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            try ChatHistoryStore.exportLibrary(to: url)
+            pushPanelState(status: AppText.localized(en: "Chat history exported.", zh: "聊天记录已导出。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func ensureHistorySnapshot(_ snapshot: PanelStateSnapshot?) -> PanelStateSnapshot? {
+        guard var snapshot else {
+            return nil
+        }
+
+        if let synced = try? ChatHistoryStore.syncSnapshot(snapshot), synced.currentThreadId != snapshot.currentThreadId {
+            snapshot = synced
+            try? PanelStateStore.save(snapshot)
+        }
+
+        return snapshot
     }
 
     private func saveUISettings(reasoningEffort: String) throws {
@@ -652,16 +932,16 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         try writeUISettings(payload)
     }
 
-    private func savePanelVisibilitySettings(
-        showPageInfo: Bool?,
-        showStatusInfo: Bool?
-    ) throws {
+    private func saveLanguage(_ rawValue: String) throws {
+        var payload = normalizedUISettings(loadUISettings())
+        payload["language"] = normalizedLanguage(rawValue)
+        try writeUISettings(payload)
+    }
+
+    private func savePanelVisibilitySettings(showPageInfo: Bool?) throws {
         var payload = normalizedUISettings(loadUISettings())
         if let showPageInfo {
             payload["show_page_info"] = showPageInfo
-        }
-        if let showStatusInfo {
-            payload["show_status_info"] = showStatusInfo
         }
         try writeUISettings(payload)
     }
@@ -712,12 +992,12 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         normalizedUISettings(loadUISettings())["theme"] as? String ?? "blue"
     }
 
-    private func loadShowPageInfo() -> Bool {
-        normalizedUISettings(loadUISettings())["show_page_info"] as? Bool ?? true
+    private func loadLanguage() -> String {
+        normalizedUISettings(loadUISettings())["language"] as? String ?? AppLanguage.default.rawValue
     }
 
-    private func loadShowStatusInfo() -> Bool {
-        normalizedUISettings(loadUISettings())["show_status_info"] as? Bool ?? true
+    private func loadShowPageInfo() -> Bool {
+        normalizedUISettings(loadUISettings())["show_page_info"] as? Bool ?? true
     }
 
     private func loadCustomSystemPrompt() -> String {
@@ -809,6 +1089,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         return ["blue", "orange", "gray", "purple", "green"].contains(rawValue) ? rawValue : fallback
     }
 
+    private func normalizedLanguage(_ rawValue: String?) -> String {
+        guard let rawValue, ["en", "zh"].contains(rawValue) else {
+            return AppLanguage.default.rawValue
+        }
+        return rawValue
+    }
+
     private func normalizeCustomSystemPrompt(_ rawValue: String?) -> String {
         String(rawValue ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -824,11 +1111,14 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "placement_mode": ["left", "right", "remember"].contains(payload["placement_mode"] as? String ?? "")
                 ? (payload["placement_mode"] as? String ?? "remember")
                 : "remember",
+            "language": normalizedLanguage(payload["language"] as? String),
             "theme": normalizedTheme(payload["theme"] as? String),
             "show_page_info": payload["show_page_info"] as? Bool ?? true,
-            "show_status_info": payload["show_status_info"] as? Bool ?? true,
             "follow_safari_window": payload["follow_safari_window"] as? Bool ?? true,
             "follow_page_color": payload["follow_page_color"] as? Bool ?? true,
+            "history_storage_path": payload["history_storage_path"] as? String ?? "",
+            "history_storage_bookmark": payload["history_storage_bookmark"] as? String ?? "",
+            "history_storage_uses_default": payload["history_storage_uses_default"] as? Bool ?? true,
             "custom_system_prompt": normalizeCustomSystemPrompt(payload["custom_system_prompt"] as? String)
         ]
     }

@@ -1,5 +1,5 @@
 <!doctype html>
-<html class="dark" lang="zh-CN">
+<html class="dark" lang="en">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -14,6 +14,7 @@
                 <div class="drawer-brand">Digital Ether</div>
                 <nav class="drawer-nav">
                     <button
+                        id="new-chat-button"
                         class="drawer-button drawer-button-primary"
                         type="button"
                     >
@@ -51,7 +52,7 @@
                 >
                     <div class="settings-drawer-inner">
                         <div class="settings-header">
-                            <div class="settings-header-title">设置</div>
+                            <div id="settings-header-title" class="settings-header-title">Settings</div>
                             <button
                                 id="settings-close-button"
                                 class="settings-close-button"
@@ -74,7 +75,7 @@
                             </button>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">AI 提供商</div>
+                            <div id="settings-label-provider" class="settings-label">AI Provider</div>
                             <div class="settings-button-row">
                                 <button
                                     class="settings-btn"
@@ -95,9 +96,9 @@
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">Codex 账户</div>
+                            <div id="settings-label-codex" class="settings-label">Codex Account</div>
                             <div class="settings-value" id="sd-codex-email">
-                                未登录
+                                Not signed in
                             </div>
                             <div
                                 class="settings-button-row"
@@ -108,21 +109,21 @@
                                     id="sd-login-codex"
                                     type="button"
                                 >
-                                    登录
+                                    Sign In
                                 </button>
                                 <button
                                     class="settings-btn"
                                     id="sd-logout-codex"
                                     type="button"
                                 >
-                                    退出
+                                    Sign Out
                                 </button>
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">Zed 账户</div>
+                            <div id="settings-label-zed" class="settings-label">Zed Account</div>
                             <div class="settings-value" id="sd-zed-name">
-                                未登录
+                                Not signed in
                             </div>
                             <div
                                 class="settings-button-row"
@@ -133,47 +134,76 @@
                                     id="sd-import-zed"
                                     type="button"
                                 >
-                                    导入 Zed
+                                    Import Zed
                                 </button>
                                 <button
                                     class="settings-btn"
                                     id="sd-logout-zed"
                                     type="button"
                                 >
-                                    退出
+                                    Sign Out
                                 </button>
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">颜色风格</div>
+                            <div id="settings-label-theme" class="settings-label">Theme</div>
                             <div class="settings-button-row">
-                                <button class="settings-btn" id="sd-theme-blue" type="button">蓝色</button>
-                                <button class="settings-btn" id="sd-theme-orange" type="button">橙色</button>
-                                <button class="settings-btn" id="sd-theme-gray" type="button">灰色</button>
-                                <button class="settings-btn" id="sd-theme-purple" type="button">紫色</button>
-                                <button class="settings-btn" id="sd-theme-green" type="button">绿色</button>
+                                <button class="settings-btn" id="sd-theme-blue" type="button">Blue</button>
+                                <button class="settings-btn" id="sd-theme-orange" type="button">Orange</button>
+                                <button class="settings-btn" id="sd-theme-gray" type="button">Gray</button>
+                                <button class="settings-btn" id="sd-theme-purple" type="button">Purple</button>
+                                <button class="settings-btn" id="sd-theme-green" type="button">Green</button>
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">页面颜色</div>
+                            <div id="settings-label-language" class="settings-label">Language</div>
                             <div class="settings-button-row">
-                                <button class="settings-btn" id="sd-follow-page-color" type="button">跟随页面颜色</button>
+                                <button class="settings-btn" id="sd-language-en" type="button">English</button>
+                                <button class="settings-btn" id="sd-language-zh" type="button">中文</button>
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">信息显示</div>
+                            <div id="settings-label-page-color" class="settings-label">Page Color</div>
                             <div class="settings-button-row">
-                                <button class="settings-btn" id="sd-toggle-page-info" type="button">当前页面</button>
-                                <button class="settings-btn" id="sd-toggle-status-info" type="button">当前状态</button>
+                                <button class="settings-btn" id="sd-follow-page-color" type="button">Follow Page Colors</button>
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">System Prompt</div>
+                            <div id="settings-label-history" class="settings-label">Chat History</div>
+                            <div class="settings-value" id="sd-history-storage-path">
+                                Default location
+                            </div>
+                            <div class="settings-hint" id="sd-history-storage-status">
+                                Default location
+                            </div>
+                            <div class="settings-button-row" style="margin-top: 8px">
+                                <button class="settings-btn settings-btn-primary" id="sd-change-history-storage" type="button">
+                                    Change Location
+                                </button>
+                                <button class="settings-btn" id="sd-reset-history-storage" type="button">
+                                    Reset Default
+                                </button>
+                                <button class="settings-btn" id="sd-import-history" type="button">
+                                    Import
+                                </button>
+                                <button class="settings-btn" id="sd-export-history" type="button">
+                                    Export
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div id="settings-label-display" class="settings-label">Display</div>
+                            <div class="settings-button-row">
+                                <button class="settings-btn" id="sd-toggle-page-info" type="button">Current Page</button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div id="settings-label-system-prompt" class="settings-label">System Prompt</div>
                             <textarea
                                 id="sd-system-prompt-editor"
                                 class="settings-textarea"
                                 rows="6"
-                                placeholder="追加到内置 system prompt 后面的自定义提示。"
+                                placeholder="Append a custom prompt after the built-in system prompt."
                             ></textarea>
                             <div class="settings-button-row" style="margin-top: 8px">
                                 <button
@@ -181,56 +211,90 @@
                                     id="sd-save-system-prompt"
                                     type="button"
                                 >
-                                    保存
+                                    Save
                                 </button>
                                 <button
                                     class="settings-btn"
                                     id="sd-reset-system-prompt"
                                     type="button"
                                 >
-                                    恢复默认
+                                    Reset Default
                                 </button>
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">窗口位置</div>
+                            <div id="settings-label-placement" class="settings-label">Window Placement</div>
                             <div class="settings-button-row">
                                 <button
                                     class="settings-btn"
                                     id="sd-placement-remember"
                                     type="button"
                                 >
-                                    记忆位置
+                                    Remember
                                 </button>
                                 <button
                                     class="settings-btn"
                                     id="sd-placement-left"
                                     type="button"
                                 >
-                                    左吸附
+                                    Snap Left
                                 </button>
                                 <button
                                     class="settings-btn"
                                     id="sd-placement-right"
                                     type="button"
                                 >
-                                    右吸附
+                                    Snap Right
                                 </button>
                             </div>
                         </div>
                         <div class="settings-section">
-                            <div class="settings-label">Safari 跟随吸附</div>
+                            <div id="settings-label-follow-safari" class="settings-label">Follow Safari</div>
                             <div class="settings-button-row">
                                 <button
                                     class="settings-btn"
                                     id="sd-follow-safari-window"
                                     type="button"
                                 >
-                                    跟随 Safari
+                                    Follow Safari
                                 </button>
                             </div>
                         </div>
                         <div class="settings-status" id="sd-status"></div>
+                    </div>
+                </div>
+
+                <div
+                    id="history-drawer"
+                    class="history-drawer"
+                    aria-hidden="true"
+                >
+                    <div class="history-drawer-inner">
+                        <div class="history-header">
+                            <div id="history-header-title" class="history-header-title">Chat History</div>
+                            <button
+                                id="history-close-button"
+                                class="settings-close-button"
+                                type="button"
+                                aria-label="收起聊天记录"
+                            >
+                                <svg
+                                    width="12"
+                                    height="12"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2.2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                >
+                                    <path d="M18 6 6 18" />
+                                    <path d="m6 6 12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div id="history-thread-list" class="history-thread-list"></div>
+                        <div id="history-action-menu" class="history-action-menu" aria-hidden="true"></div>
                     </div>
                 </div>
 
@@ -241,21 +305,21 @@
                             type="button"
                             data-prompt="解释当前页面"
                         >
-                            解释页面
+                            Explain Page
                         </button>
                         <button
                             class="suggestion-pill"
                             type="button"
                             data-prompt="翻译当前页面为中文"
                         >
-                            翻译页面
+                            Translate Page
                         </button>
                         <button
                             class="suggestion-pill"
                             type="button"
                             data-prompt="针对当前页面给出建议"
                         >
-                            给出建议
+                            Give Suggestions
                         </button>
                     </div>
 
@@ -277,48 +341,6 @@
                         ></textarea>
                         <div class="composer-footer">
                             <div class="composer-left">
-                                <div id="status-chip" class="status-chip">
-                                    <span id="conversation-status"></span>
-                                </div>
-                            </div>
-                            <div class="composer-right">
-                                <div class="model-chip">
-                                    <span
-                                        id="model-display"
-                                        class="model-display"
-                                        aria-hidden="true"
-                                    ></span>
-                                    <select
-                                        id="model-select"
-                                        aria-label="选择模型"
-                                    ></select>
-                                </div>
-                                <button
-                                    id="refresh-context-button"
-                                    class="icon-button icon-button-muted"
-                                    type="button"
-                                    aria-label="刷新"
-                                >
-                                    <svg
-                                        width="14"
-                                        height="14"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2.2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                    >
-                                        <path d="M21.5 2v6h-6" />
-                                        <path d="M2.5 22v-6h6" />
-                                        <path
-                                            d="M3.5 12a9 9 0 0 1 14.8-5.2L21.5 8"
-                                        />
-                                        <path
-                                            d="M20.5 12a9 9 0 0 1-14.8 5.2L2.5 16"
-                                        />
-                                    </svg>
-                                </button>
                                 <button
                                     id="settings-button"
                                     class="icon-button icon-button-muted"
@@ -339,6 +361,59 @@
                                         <path
                                             d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
                                         />
+                                    </svg>
+                                </button>
+                                <button
+                                    id="refresh-context-button"
+                                    class="icon-button icon-button-muted"
+                                    type="button"
+                                    aria-label="聊天记录"
+                                >
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2.2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                    >
+                                        <path d="M12 8v5l3 2" />
+                                        <circle cx="12" cy="12" r="8" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="composer-right">
+                                <div class="model-chip">
+                                    <span
+                                        id="model-display"
+                                        class="model-display"
+                                        aria-hidden="true"
+                                    ></span>
+                                    <select
+                                        id="model-select"
+                                        aria-label="选择模型"
+                                    ></select>
+                                </div>
+                                <button
+                                    id="new-chat-footer-button"
+                                    class="icon-button icon-button-muted"
+                                    type="button"
+                                    aria-label="新对话"
+                                >
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2.2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                    >
+                                        <path d="M12 5v14" />
+                                        <path d="M5 12h14" />
                                     </svg>
                                 </button>
                                 <button

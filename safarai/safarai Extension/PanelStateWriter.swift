@@ -21,6 +21,7 @@ enum PanelStateWriter {
 
         let snapshot: [String: Any] = [
             "context": normalizedIncomingContext as Any,
+            "currentThreadId": current["currentThreadId"] as Any,
             "messages": preservedMessages,
             "status": status as Any,
             "updatedAt": Date().timeIntervalSince1970,
@@ -42,6 +43,7 @@ enum PanelStateWriter {
 
         let snapshot: [String: Any] = [
             "context": context,
+            "currentThreadId": current["currentThreadId"] as Any,
             "messages": current["messages"] as? [[String: Any]] ?? [],
             "status": status as Any,
             "updatedAt": Date().timeIntervalSince1970,

@@ -1,32 +1,150 @@
 const modelSelect = document.getElementById("model-select");
 const modelDisplay = document.getElementById("model-display");
 const conversationList = document.getElementById("conversation-list");
-const conversationStatus = document.getElementById("conversation-status");
 const contextURL = document.getElementById("context-url");
 const contextSelectionText = document.getElementById("context-selection-text");
 const composerDivider = document.getElementById("composer-divider");
 const questionEditor = document.getElementById("question-editor");
 const askPageButton = document.getElementById("ask-page");
-const refreshContextButton = document.getElementById("refresh-context-button");
+const historyButton = document.getElementById("refresh-context-button");
 const settingsButton = document.getElementById("settings-button");
 const settingsCloseButton = document.getElementById("settings-close-button");
+const historyCloseButton = document.getElementById("history-close-button");
 const systemPromptEditor = document.getElementById("sd-system-prompt-editor");
 const saveSystemPromptButton = document.getElementById("sd-save-system-prompt");
 const resetSystemPromptButton = document.getElementById("sd-reset-system-prompt");
-const statusChip = document.getElementById("status-chip");
 const contextPreviewURL = document.getElementById("context-preview-url");
+const historyThreadList = document.getElementById("history-thread-list");
+const historyActionMenu = document.getElementById("history-action-menu");
+const newChatButton = document.getElementById("new-chat-button");
+const newChatFooterButton = document.getElementById("new-chat-footer-button");
+const languageButtonEN = document.getElementById("sd-language-en");
+const languageButtonZH = document.getElementById("sd-language-zh");
 let isStreamingResponse = false;
 let currentDrawerState = {
+  language: "en",
   theme: "blue",
   showPageInfo: true,
-  showStatusInfo: true,
   followSafariWindow: true,
   followPageColor: true,
   customSystemPrompt: "",
 };
 let currentContext = null;
+let currentThreadId = "";
+let openHistoryMenuThreadId = "";
 let systemPromptSavedValue = "";
 let systemPromptDirty = false;
+
+const I18N = {
+  en: {
+    settings_title: "Settings",
+    provider: "AI Provider",
+    codex_account: "Codex Account",
+    zed_account: "Zed Account",
+    theme: "Theme",
+    language: "Language",
+    page_color: "Page Color",
+    chat_history: "Chat History",
+    display: "Display",
+    system_prompt: "System Prompt",
+    placement: "Window Placement",
+    follow_safari: "Follow Safari",
+    sign_in: "Sign In",
+    sign_out: "Sign Out",
+    import_zed: "Import Zed",
+    blue: "Blue",
+    orange: "Orange",
+    gray: "Gray",
+    purple: "Purple",
+    green: "Green",
+    follow_page_color: "Follow Page Colors",
+    change_location: "Change Location",
+    reset_default: "Reset Default",
+    import: "Import",
+    export: "Export",
+    current_page: "Current Page",
+    save: "Save",
+    remember: "Remember",
+    snap_left: "Snap Left",
+    snap_right: "Snap Right",
+    follow_safari_button: "Follow Safari",
+    history_title: "Chat History",
+    explain_page: "Explain Page",
+    translate_page: "Translate Page",
+    give_suggestions: "Give Suggestions",
+    default_location: "Default location",
+    no_history: "No chat history yet",
+    unknown_page: "Unknown page",
+    unknown_time: "Unknown time",
+    rename: "Rename",
+    pin: "Pin",
+    unpin: "Unpin",
+    delete: "Delete",
+    rename_prompt: "Enter a new chat title",
+    delete_confirm: "Delete this chat record?",
+    aria_close_settings: "Close settings",
+    aria_close_history: "Close chat history",
+    aria_history: "Chat history",
+    aria_settings: "Settings",
+    aria_send: "Send",
+    aria_stop: "Stop",
+    system_prompt_placeholder: "Append a custom prompt after the built-in system prompt.",
+  },
+  zh: {
+    settings_title: "设置",
+    provider: "AI 提供商",
+    codex_account: "Codex 账户",
+    zed_account: "Zed 账户",
+    theme: "颜色风格",
+    language: "语言",
+    page_color: "页面颜色",
+    chat_history: "聊天记录",
+    display: "信息显示",
+    system_prompt: "System Prompt",
+    placement: "窗口位置",
+    follow_safari: "Safari 跟随吸附",
+    sign_in: "登录",
+    sign_out: "退出",
+    import_zed: "导入 Zed",
+    blue: "蓝色",
+    orange: "橙色",
+    gray: "灰色",
+    purple: "紫色",
+    green: "绿色",
+    follow_page_color: "跟随页面颜色",
+    change_location: "更改位置",
+    reset_default: "恢复默认",
+    import: "导入",
+    export: "导出",
+    current_page: "当前页面",
+    save: "保存",
+    remember: "记忆位置",
+    snap_left: "左吸附",
+    snap_right: "右吸附",
+    follow_safari_button: "跟随 Safari",
+    history_title: "聊天记录",
+    explain_page: "解释页面",
+    translate_page: "翻译页面",
+    give_suggestions: "给出建议",
+    default_location: "默认位置",
+    no_history: "暂无聊天记录",
+    unknown_page: "未知页面",
+    unknown_time: "未知时间",
+    rename: "重命名",
+    pin: "置顶",
+    unpin: "取消置顶",
+    delete: "删除",
+    rename_prompt: "输入新的聊天记录标题",
+    delete_confirm: "确定删除这条聊天记录？",
+    aria_close_settings: "收起设置",
+    aria_close_history: "收起聊天记录",
+    aria_history: "聊天记录",
+    aria_settings: "设置",
+    aria_send: "发送",
+    aria_stop: "终止",
+    system_prompt_placeholder: "追加到内置 system prompt 后面的自定义提示。",
+  },
+};
 
 const SEND_ICON = `
   <svg
@@ -64,14 +182,27 @@ modelSelect.addEventListener("change", () => {
   });
 });
 settingsButton.addEventListener("click", () => {
+  closeHistoryDrawer();
   toggleSettingsDrawer();
 });
 settingsCloseButton.addEventListener("click", () => {
   closeSettingsDrawer();
 });
-refreshContextButton.addEventListener("click", () => {
+historyButton.addEventListener("click", () => {
+  closeSettingsDrawer();
+  toggleHistoryDrawer();
+});
+historyCloseButton.addEventListener("click", () => closeHistoryDrawer());
+newChatButton.addEventListener("click", () => {
+  closeHistoryDrawer();
   webkit.messageHandlers.controller.postMessage({
-    command: "refresh-panel-context",
+    command: "create-thread",
+  });
+});
+newChatFooterButton.addEventListener("click", () => {
+  closeHistoryDrawer();
+  webkit.messageHandlers.controller.postMessage({
+    command: "create-thread",
   });
 });
 systemPromptEditor.addEventListener("input", () => {
@@ -138,6 +269,7 @@ function stopCurrentResponse() {
 // MARK: - Settings Drawer
 
 const settingsDrawer = document.getElementById("settings-drawer");
+const historyDrawer = document.getElementById("history-drawer");
 
 function toggleSettingsDrawer() {
   const isOpen = settingsDrawer.classList.contains("open");
@@ -149,6 +281,7 @@ function toggleSettingsDrawer() {
 }
 
 function openSettingsDrawer() {
+  closeHistoryDrawer();
   settingsDrawer.classList.add("open");
   settingsDrawer.setAttribute("aria-hidden", "false");
   settingsButton.dataset.active = "true";
@@ -162,6 +295,28 @@ function closeSettingsDrawer() {
   settingsButton.setAttribute("aria-expanded", "false");
 }
 
+function toggleHistoryDrawer() {
+  const isOpen = historyDrawer.classList.contains("open");
+  if (isOpen) {
+    closeHistoryDrawer();
+  } else {
+    openHistoryDrawer();
+  }
+}
+
+function openHistoryDrawer() {
+  closeSettingsDrawer();
+  historyDrawer.classList.add("open");
+  historyDrawer.setAttribute("aria-hidden", "false");
+  historyButton.dataset.active = "true";
+}
+
+function closeHistoryDrawer() {
+  historyDrawer.classList.remove("open");
+  historyDrawer.setAttribute("aria-hidden", "true");
+  historyButton.dataset.active = "false";
+}
+
 // Close drawer when clicking outside of it
 document.addEventListener("click", (e) => {
   if (
@@ -171,6 +326,17 @@ document.addEventListener("click", (e) => {
     !settingsButton.contains(e.target)
   ) {
     closeSettingsDrawer();
+  }
+  if (
+    historyDrawer.classList.contains("open") &&
+    !historyDrawer.contains(e.target) &&
+    e.target !== historyButton &&
+    !historyButton.contains(e.target)
+  ) {
+    closeHistoryDrawer();
+  }
+  if (!e.target.closest?.(".history-action-menu") && !e.target.closest?.(".history-thread-menu-button")) {
+    closeHistoryActionMenu();
   }
 });
 
@@ -192,17 +358,13 @@ function sdSaveTheme(theme) {
   sdPost("save-theme-settings", { theme });
 }
 
+function sdSaveLanguage(language) {
+  sdPost("save-language-settings", { language });
+}
+
 function sdTogglePageInfo() {
   sdPost("save-panel-visibility-settings", {
     showPageInfo: !currentDrawerState.showPageInfo,
-    showStatusInfo: currentDrawerState.showStatusInfo,
-  });
-}
-
-function sdToggleStatusInfo() {
-  sdPost("save-panel-visibility-settings", {
-    showPageInfo: currentDrawerState.showPageInfo,
-    showStatusInfo: !currentDrawerState.showStatusInfo,
   });
 }
 
@@ -216,6 +378,22 @@ function sdToggleFollowPageColor() {
   sdPost("save-follow-page-color-settings", {
     followPageColor: !currentDrawerState.followPageColor,
   });
+}
+
+function sdChangeHistoryStorage() {
+  sdPost("change-history-storage-location");
+}
+
+function sdResetHistoryStorage() {
+  sdPost("reset-history-storage-location");
+}
+
+function sdImportHistory() {
+  sdPost("import-history-library");
+}
+
+function sdExportHistory() {
+  sdPost("export-history-library");
 }
 
 document
@@ -254,18 +432,29 @@ document
 document
   .getElementById("sd-theme-green")
   .addEventListener("click", () => sdSaveTheme("green"));
+languageButtonEN.addEventListener("click", () => sdSaveLanguage("en"));
+languageButtonZH.addEventListener("click", () => sdSaveLanguage("zh"));
 document
   .getElementById("sd-toggle-page-info")
   .addEventListener("click", () => sdTogglePageInfo());
-document
-  .getElementById("sd-toggle-status-info")
-  .addEventListener("click", () => sdToggleStatusInfo());
 document
   .getElementById("sd-follow-safari-window")
   .addEventListener("click", () => sdToggleFollowSafariWindow());
 document
   .getElementById("sd-follow-page-color")
   .addEventListener("click", () => sdToggleFollowPageColor());
+document
+  .getElementById("sd-change-history-storage")
+  .addEventListener("click", () => sdChangeHistoryStorage());
+document
+  .getElementById("sd-reset-history-storage")
+  .addEventListener("click", () => sdResetHistoryStorage());
+document
+  .getElementById("sd-import-history")
+  .addEventListener("click", () => sdImportHistory());
+document
+  .getElementById("sd-export-history")
+  .addEventListener("click", () => sdExportHistory());
 
 syncSystemPromptButtons();
 
@@ -277,11 +466,14 @@ syncSystemPromptButtons();
 function renderSettingsDrawerState(payload) {
   const el = (id) => document.getElementById(id);
   currentDrawerState = {
+    language: payload.language || "en",
     theme: payload.theme || "blue",
     showPageInfo: payload.showPageInfo !== false,
-    showStatusInfo: payload.showStatusInfo !== false,
     followSafariWindow: payload.followSafariWindow !== false,
     followPageColor: payload.followPageColor !== false,
+    historyStoragePath: payload.historyStoragePath || "",
+    historyStorageStatus: payload.historyStorageStatus || "",
+    historyStorageUsesDefault: payload.historyStorageUsesDefault !== false,
     customSystemPrompt: payload.customSystemPrompt || "",
   };
   el("sd-codex-email").textContent = payload.codexEmail || "未登录";
@@ -312,14 +504,20 @@ function renderSettingsDrawerState(payload) {
     el(`sd-theme-${theme}`).dataset.active =
       currentDrawerState.theme === theme ? "true" : "false";
   }
+  languageButtonEN.dataset.active = currentDrawerState.language === "en" ? "true" : "false";
+  languageButtonZH.dataset.active = currentDrawerState.language === "zh" ? "true" : "false";
   el("sd-toggle-page-info").dataset.active =
     currentDrawerState.showPageInfo ? "true" : "false";
-  el("sd-toggle-status-info").dataset.active =
-    currentDrawerState.showStatusInfo ? "true" : "false";
   el("sd-follow-safari-window").dataset.active =
     currentDrawerState.followSafariWindow ? "true" : "false";
   el("sd-follow-page-color").dataset.active =
     currentDrawerState.followPageColor ? "true" : "false";
+  el("sd-history-storage-path").textContent =
+    currentDrawerState.historyStoragePath || "默认位置";
+  el("sd-history-storage-status").textContent =
+    currentDrawerState.historyStorageStatus || "默认位置";
+  el("sd-reset-history-storage").disabled =
+    currentDrawerState.historyStorageUsesDefault === true;
 
   el("sd-status").textContent =
     payload.settingsStatus && payload.settingsStatus !== "Ready"
@@ -327,6 +525,7 @@ function renderSettingsDrawerState(payload) {
       : "";
 
   applyTheme(currentDrawerState.theme);
+  applyTranslations();
   syncSystemPromptEditor(currentDrawerState.customSystemPrompt);
 }
 
@@ -392,12 +591,22 @@ function renderPanelState(payload) {
   const settings = payload?.settings || {};
   const status = payload?.status || null;
   const context = payload?.context || null;
+  const historyThreads = Array.isArray(payload?.historyThreads)
+    ? payload.historyThreads
+    : [];
   currentContext = context;
+  currentThreadId = String(payload?.currentThreadId || "");
   isStreamingResponse = !!payload?.isStreaming;
+
+  if (settings.drawerState) {
+    renderSettingsDrawerState(settings.drawerState);
+  } else {
+    applyTranslations();
+  }
 
   questionEditor.disabled = !settings.isLoggedIn || isStreamingResponse;
   askPageButton.disabled = !settings.isLoggedIn;
-  refreshContextButton.disabled = false;
+  historyButton.disabled = false;
   settingsButton.disabled = false;
   syncAskButton();
 
@@ -416,14 +625,8 @@ function renderPanelState(payload) {
     ? `"${currentSelectionText}"`
     : "";
   contextSelectionText.classList.toggle("is-hidden", !currentSelectionText);
-  conversationStatus.textContent =
-    status || (messages.length ? `${messages.length} 条` : "Ready");
   applyVisibility(settings);
-
-  // Sync settings drawer state if payload carries it
-  if (settings.drawerState) {
-    renderSettingsDrawerState(settings.drawerState);
-  }
+  renderHistoryThreadList(historyThreads, currentThreadId);
   applyPageVisualState(context?.metadata || {});
 }
 
@@ -527,18 +730,16 @@ function clearSurfacePalette() {
 
 function applyVisibility(settings) {
   const showPageInfo = settings.showPageInfo !== false;
-  const showStatusInfo = settings.showStatusInfo !== false;
 
   contextURL.classList.toggle("is-hidden", !showPageInfo);
   composerDivider.classList.toggle("is-hidden", !showPageInfo);
-  statusChip.classList.toggle("is-hidden", !showStatusInfo);
 }
 
 function syncAskButton() {
   askPageButton.dataset.mode = isStreamingResponse ? "stop" : "send";
   askPageButton.classList.toggle("icon-button-danger", isStreamingResponse);
   askPageButton.classList.toggle("icon-button-primary", !isStreamingResponse);
-  askPageButton.setAttribute("aria-label", isStreamingResponse ? "终止" : "发送");
+  askPageButton.setAttribute("aria-label", isStreamingResponse ? t("aria_stop") : t("aria_send"));
   askPageButton.innerHTML = isStreamingResponse ? STOP_ICON : SEND_ICON;
 }
 
@@ -573,6 +774,86 @@ function syncSystemPromptButtons() {
 
 function normalizeSystemPrompt(value) {
   return String(value || "").trim().slice(0, 4000);
+}
+
+function currentLanguage() {
+  return currentDrawerState.language === "zh" ? "zh" : "en";
+}
+
+function t(key) {
+  const language = currentLanguage();
+  return I18N[language][key] || I18N.en[key] || key;
+}
+
+function applyTranslations() {
+  document.documentElement.lang = currentLanguage() === "zh" ? "zh-CN" : "en";
+  document.getElementById("settings-header-title").textContent = t("settings_title");
+  document.getElementById("settings-label-provider").textContent = t("provider");
+  document.getElementById("settings-label-codex").textContent = t("codex_account");
+  document.getElementById("settings-label-zed").textContent = t("zed_account");
+  document.getElementById("settings-label-theme").textContent = t("theme");
+  document.getElementById("settings-label-language").textContent = t("language");
+  document.getElementById("settings-label-page-color").textContent = t("page_color");
+  document.getElementById("settings-label-history").textContent = t("chat_history");
+  document.getElementById("settings-label-display").textContent = t("display");
+  document.getElementById("settings-label-system-prompt").textContent = t("system_prompt");
+  document.getElementById("settings-label-placement").textContent = t("placement");
+  document.getElementById("settings-label-follow-safari").textContent = t("follow_safari");
+  document.getElementById("history-header-title").textContent = t("history_title");
+
+  document.getElementById("sd-login-codex").textContent = t("sign_in");
+  document.getElementById("sd-logout-codex").textContent = t("sign_out");
+  document.getElementById("sd-import-zed").textContent = t("import_zed");
+  document.getElementById("sd-logout-zed").textContent = t("sign_out");
+  document.getElementById("sd-theme-blue").textContent = t("blue");
+  document.getElementById("sd-theme-orange").textContent = t("orange");
+  document.getElementById("sd-theme-gray").textContent = t("gray");
+  document.getElementById("sd-theme-purple").textContent = t("purple");
+  document.getElementById("sd-theme-green").textContent = t("green");
+  document.getElementById("sd-follow-page-color").textContent = t("follow_page_color");
+  document.getElementById("sd-change-history-storage").textContent = t("change_location");
+  document.getElementById("sd-reset-history-storage").textContent = t("reset_default");
+  document.getElementById("sd-import-history").textContent = t("import");
+  document.getElementById("sd-export-history").textContent = t("export");
+  document.getElementById("sd-toggle-page-info").textContent = t("current_page");
+  document.getElementById("sd-save-system-prompt").textContent = t("save");
+  document.getElementById("sd-reset-system-prompt").textContent = t("reset_default");
+  document.getElementById("sd-placement-remember").textContent = t("remember");
+  document.getElementById("sd-placement-left").textContent = t("snap_left");
+  document.getElementById("sd-placement-right").textContent = t("snap_right");
+  document.getElementById("sd-follow-safari-window").textContent = t("follow_safari_button");
+  document.getElementById("sd-history-storage-path").textContent =
+    currentDrawerState.historyStoragePath || t("default_location");
+  document.getElementById("sd-history-storage-status").textContent =
+    currentDrawerState.historyStorageStatus || t("default_location");
+  systemPromptEditor.placeholder = t("system_prompt_placeholder");
+  settingsCloseButton.setAttribute("aria-label", t("aria_close_settings"));
+  historyCloseButton.setAttribute("aria-label", t("aria_close_history"));
+  historyButton.setAttribute("aria-label", t("aria_history"));
+  settingsButton.setAttribute("aria-label", t("aria_settings"));
+
+  const newChatLabel = newChatButton.querySelector("span:last-child");
+  if (newChatLabel) {
+    newChatLabel.textContent = currentLanguage() === "zh" ? "新对话" : "New Chat";
+  }
+  newChatFooterButton.setAttribute("aria-label", currentLanguage() === "zh" ? "新对话" : "New Chat");
+
+  const suggestionButtons = document.querySelectorAll(".suggestion-pill");
+  if (suggestionButtons[0]) {
+    suggestionButtons[0].textContent = t("explain_page");
+    suggestionButtons[0].dataset.prompt =
+      currentLanguage() === "zh" ? "解释当前页面" : "Explain the current page";
+  }
+  if (suggestionButtons[1]) {
+    suggestionButtons[1].textContent = t("translate_page");
+    suggestionButtons[1].dataset.prompt =
+      currentLanguage() === "zh" ? "翻译当前页面为中文" : "Translate the current page";
+  }
+  if (suggestionButtons[2]) {
+    suggestionButtons[2].textContent = t("give_suggestions");
+    suggestionButtons[2].dataset.prompt =
+      currentLanguage() === "zh" ? "针对当前页面给出建议" : "Give suggestions for the current page";
+  }
 }
 
 function normalizeVisualValue(value) {
@@ -695,6 +976,165 @@ function renderMessages(messages) {
     entry.innerHTML = `<div class="${cssClass}">${content}</div>`;
     conversationList.appendChild(entry);
   }
+}
+
+historyThreadList.addEventListener("click", (event) => {
+  const menuButton = event.target.closest?.("[data-history-menu-button]");
+  if (menuButton) {
+    const threadId = menuButton.dataset.threadId || "";
+    const isPinned = menuButton.dataset.pinned === "true";
+    if (openHistoryMenuThreadId === threadId) {
+      closeHistoryActionMenu();
+      return;
+    }
+    openHistoryActionMenu(threadId, isPinned, menuButton);
+    return;
+  }
+
+  const button = event.target.closest?.("[data-history-open]");
+  if (!button) {
+    return;
+  }
+
+  const threadId = button.dataset.threadId || "";
+  if (!threadId) {
+    return;
+  }
+
+  webkit.messageHandlers.controller.postMessage({
+    command: "load-thread",
+    threadId,
+  });
+  closeHistoryDrawer();
+});
+
+function renderHistoryThreadList(threads, activeThreadId) {
+  historyThreadList.innerHTML = "";
+
+  if (!threads.length) {
+    const empty = document.createElement("div");
+    empty.className = "history-thread-empty";
+    empty.textContent = t("no_history");
+    historyThreadList.appendChild(empty);
+    return;
+  }
+
+  for (const thread of threads) {
+    const item = document.createElement("div");
+    item.className = "history-thread-item";
+    item.dataset.threadId = thread.id || "";
+    item.dataset.active = String(thread.id || "") === String(activeThreadId) ? "true" : "false";
+    const sourceText =
+      thread.sourcePageTitle ||
+      thread.sourcePageURL ||
+      t("unknown_page");
+    item.innerHTML = `
+      <div class="history-thread-row">
+        <button
+          type="button"
+          class="history-thread-open"
+          data-history-open="true"
+          data-thread-id="${escapeHtml(thread.id || "")}"
+        >
+          <div class="history-thread-title">${escapeHtml(thread.title || "新对话")}</div>
+        </button>
+        <button
+          type="button"
+          class="history-thread-menu-button"
+          data-history-menu-button="true"
+          data-thread-id="${escapeHtml(thread.id || "")}"
+          data-pinned="${thread.isPinned ? "true" : "false"}"
+          aria-label="More actions"
+        >...</button>
+      </div>
+      <button
+        type="button"
+        class="history-thread-open history-thread-open-meta"
+        data-history-open="true"
+        data-thread-id="${escapeHtml(thread.id || "")}"
+      >
+        <div class="history-thread-meta">
+          <span>${escapeHtml(formatThreadTimestamp(thread.updatedAt))}</span>
+          <span>${escapeHtml(sourceText)}</span>
+        </div>
+      </button>
+    `;
+    historyThreadList.appendChild(item);
+  }
+}
+
+function openHistoryActionMenu(threadId, isPinned, anchor) {
+  openHistoryMenuThreadId = threadId;
+  openHistoryMenuPinned = isPinned;
+  historyActionMenu.innerHTML = `
+    <button type="button" class="history-action-menu-item" data-history-action="rename">${t("rename")}</button>
+    <button type="button" class="history-action-menu-item" data-history-action="pin">${isPinned ? t("unpin") : t("pin")}</button>
+    <button type="button" class="history-action-menu-item history-action-menu-item-danger" data-history-action="delete">${t("delete")}</button>
+  `;
+  historyActionMenu.classList.add("open");
+  historyActionMenu.setAttribute("aria-hidden", "false");
+
+  const drawerRect = historyDrawer.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  historyActionMenu.style.top = `${anchorRect.bottom - drawerRect.top + 6}px`;
+  historyActionMenu.style.left = `${Math.max(12, anchorRect.right - drawerRect.left - 152)}px`;
+}
+
+function closeHistoryActionMenu() {
+  openHistoryMenuThreadId = "";
+  openHistoryMenuPinned = false;
+  historyActionMenu.classList.remove("open");
+  historyActionMenu.setAttribute("aria-hidden", "true");
+  historyActionMenu.innerHTML = "";
+}
+
+historyActionMenu.addEventListener("click", (event) => {
+  const actionButton = event.target.closest?.("[data-history-action]");
+  if (!actionButton || !openHistoryMenuThreadId) {
+    return;
+  }
+
+  const action = actionButton.dataset.historyAction || "";
+  if (action === "rename") {
+    webkit.messageHandlers.controller.postMessage({
+      command: "prompt-rename-thread",
+      threadId: openHistoryMenuThreadId,
+    });
+  } else if (action === "pin") {
+    webkit.messageHandlers.controller.postMessage({
+      command: "toggle-pin-thread",
+      threadId: openHistoryMenuThreadId,
+      isPinned: !openHistoryMenuPinned,
+    });
+  } else if (action === "delete") {
+    webkit.messageHandlers.controller.postMessage({
+      command: "confirm-delete-thread",
+      threadId: openHistoryMenuThreadId,
+    });
+  }
+
+  closeHistoryActionMenu();
+});
+
+function formatThreadTimestamp(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return t("unknown_time");
+  }
+
+  const date =
+    numeric > 10_000_000_000 ? new Date(numeric) : new Date(numeric * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return t("unknown_time");
+  }
+
+  return date.toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 function renderPlainText(value) {
