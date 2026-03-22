@@ -55,6 +55,7 @@ export function extractPageContext(win, doc) {
   const metadata = adapter.extractMetadata(win.location.pathname, doc);
   const rootSelection = selectContentRoot(win, doc, adapter);
   const articleExtraction = buildArticleText(win, doc, rootSelection, adapter);
+  const pageVisual = extractPageVisualState(win, doc, rootSelection.root);
   const pageAnalysis = analyzeTree(win, doc.body ?? rootSelection.root, {
     collectInteractive: true,
   });
@@ -88,6 +89,10 @@ export function extractPageContext(win, doc) {
     metadata: {
       domain,
       ...metadata,
+      pageBackgroundColor: pageVisual.backgroundColor,
+      pageBackgroundImage: pageVisual.backgroundImage,
+      pageColorScheme: pageVisual.colorScheme,
+      pageBackgroundSource: pageVisual.source,
       contentStrategy: articleExtraction.contentStrategy,
       headingCount: String(rootSelection.analysis.headingCount),
       interactiveCount: String(pageAnalysis.interactiveCount),
@@ -549,6 +554,70 @@ function buildInteractiveSummary(items) {
       `${index + 1}. label=${item.label} | role=${item.role} | type=${item.type} | enabled=${item.enabled} | position=${item.position}`
     )
     .join("\n");
+}
+
+function extractPageVisualState(win, doc, root) {
+  const candidates = uniqueNodes([
+    root,
+    doc.activeElement,
+    doc.querySelector?.("#root"),
+    doc.querySelector?.("#app"),
+    doc.querySelector?.("#__next"),
+    doc.querySelector?.("[data-testid='primaryColumn']"),
+    doc.querySelector?.("[role='main']"),
+    doc.querySelector?.("main"),
+    doc.querySelector?.("article"),
+    doc.body,
+    doc.documentElement,
+  ]);
+
+  let firstGradientImage = "none";
+  let firstGradientSource = "unknown";
+  let firstDetectedScheme = "";
+
+  for (const candidate of candidates) {
+    let current = candidate;
+
+    while (current) {
+      const computedStyle = resolveComputedStyle(win, current);
+      const normalizedScheme = normalizeColorScheme(computedStyle?.colorScheme);
+      if (!firstDetectedScheme && normalizedScheme) {
+        firstDetectedScheme = normalizedScheme;
+      }
+
+      const backgroundImage = normalizeBackgroundImage(computedStyle?.backgroundImage);
+      if (backgroundImage !== "none" && firstGradientImage === "none") {
+        firstGradientImage = backgroundImage;
+        firstGradientSource = describeVisualNode(current);
+      }
+
+      const backgroundColor = normalizeBackgroundColor(computedStyle?.backgroundColor);
+      if (backgroundColor && !isTransparentColor(backgroundColor)) {
+        const currentSource = describeVisualNode(current);
+        return {
+          backgroundColor,
+          backgroundImage: backgroundImage !== "none" ? backgroundImage : firstGradientImage,
+          colorScheme: normalizedScheme || inferColorSchemeFromColor(backgroundColor),
+          source:
+            backgroundImage !== "none"
+              ? currentSource
+              : firstGradientImage !== "none"
+                ? firstGradientSource
+                : currentSource,
+        };
+      }
+
+      current = current.parentElement ?? null;
+    }
+  }
+
+  const fallbackColor = firstDetectedScheme === "dark" ? "rgb(28, 28, 30)" : "rgb(255, 255, 255)";
+  return {
+    backgroundColor: fallbackColor,
+    backgroundImage: firstGradientImage,
+    colorScheme: firstDetectedScheme || inferColorSchemeFromColor(fallbackColor),
+    source: firstGradientImage !== "none" ? firstGradientSource : "fallback",
+  };
 }
 
 function buildContentBlock(node) {
@@ -1091,6 +1160,161 @@ function joinBlocks(blocks) {
 
 function trimToLength(value, maxLength) {
   return String(value || "").slice(0, maxLength).trim();
+}
+
+function uniqueNodes(nodes) {
+  const seen = new Set();
+  const result = [];
+
+  for (const node of nodes) {
+    if (!node || seen.has(node)) {
+      continue;
+    }
+    seen.add(node);
+    result.push(node);
+  }
+
+  return result;
+}
+
+function normalizeBackgroundImage(value) {
+  const normalized = String(value || "").trim();
+  return normalized && normalized !== "initial" ? normalized : "none";
+}
+
+function normalizeBackgroundColor(value) {
+  const normalized = String(value || "").trim();
+  return normalized || "";
+}
+
+function normalizeColorScheme(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  if (!normalized || normalized === "normal") {
+    return "";
+  }
+
+  if (normalized.includes("dark") && !normalized.includes("light")) {
+    return "dark";
+  }
+
+  if (normalized.includes("light") && !normalized.includes("dark")) {
+    return "light";
+  }
+
+  return "";
+}
+
+function isTransparentColor(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  if (!normalized) {
+    return true;
+  }
+
+  if (normalized === "transparent") {
+    return true;
+  }
+
+  const channels = parseColorChannels(normalized);
+  if (!channels) {
+    return false;
+  }
+
+  return channels.alpha <= 0.01;
+}
+
+function inferColorSchemeFromColor(value) {
+  const channels = parseColorChannels(value);
+  if (!channels) {
+    return "dark";
+  }
+
+  const luminance =
+    (0.2126 * channels.red + 0.7152 * channels.green + 0.0722 * channels.blue) /
+    255;
+  return luminance >= 0.6 ? "light" : "dark";
+}
+
+function parseColorChannels(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  const rgbMatch = normalized.match(
+    /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[/,]\s*([0-9.]+))?\s*\)$/
+  );
+  if (rgbMatch) {
+    return {
+      red: clampChannel(rgbMatch[1]),
+      green: clampChannel(rgbMatch[2]),
+      blue: clampChannel(rgbMatch[3]),
+      alpha: clampAlpha(rgbMatch[4]),
+    };
+  }
+
+  const hexMatch = normalized.match(/^#([0-9a-f]{3,8})$/i);
+  if (!hexMatch) {
+    return null;
+  }
+
+  const hex = hexMatch[1];
+  if (hex.length === 3 || hex.length === 4) {
+    return {
+      red: parseInt(`${hex[0]}${hex[0]}`, 16),
+      green: parseInt(`${hex[1]}${hex[1]}`, 16),
+      blue: parseInt(`${hex[2]}${hex[2]}`, 16),
+      alpha: hex.length === 4 ? parseInt(`${hex[3]}${hex[3]}`, 16) / 255 : 1,
+    };
+  }
+
+  if (hex.length === 6 || hex.length === 8) {
+    return {
+      red: parseInt(hex.slice(0, 2), 16),
+      green: parseInt(hex.slice(2, 4), 16),
+      blue: parseInt(hex.slice(4, 6), 16),
+      alpha: hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1,
+    };
+  }
+
+  return null;
+}
+
+function clampChannel(value) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(255, parsed));
+}
+
+function clampAlpha(value) {
+  if (value == null) {
+    return 1;
+  }
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.max(0, Math.min(1, parsed));
+}
+
+function describeVisualNode(node) {
+  const tagName = getTagName(node);
+  if (!tagName) {
+    return "unknown";
+  }
+
+  const id = readAttribute(node, "id");
+  if (id) {
+    return `${tagName}#${id}`;
+  }
+
+  return tagName;
 }
 
 function readNodeText(node) {

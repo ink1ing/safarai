@@ -151,6 +151,67 @@ test("通用页面会回退到结构化正文抽取", () => {
   assert.match(result.articleText, /第二段内容/);
 });
 
+test("页面视觉信息会提取非透明背景、渐变和配色模式", () => {
+  const main = createNode({
+    tagName: "MAIN",
+    textContent: "Long-form content ".repeat(16),
+    computedStyle: {
+      display: "block",
+      visibility: "visible",
+      opacity: "1",
+      backgroundColor: "rgba(0, 0, 0, 0)",
+      backgroundImage: "none",
+      colorScheme: "normal",
+    },
+  });
+  const root = createNode({
+    tagName: "DIV",
+    attrs: { id: "root" },
+    children: [main],
+    computedStyle: {
+      display: "block",
+      visibility: "visible",
+      opacity: "1",
+      backgroundColor: "rgba(0, 0, 0, 0)",
+      backgroundImage: "linear-gradient(rgb(245, 247, 250), rgb(255, 255, 255))",
+      colorScheme: "light",
+    },
+  });
+  const body = createNode({
+    tagName: "BODY",
+    children: [root],
+    computedStyle: {
+      display: "block",
+      visibility: "visible",
+      opacity: "1",
+      backgroundColor: "rgb(245, 247, 250)",
+      backgroundImage: "none",
+      colorScheme: "light",
+    },
+  });
+
+  const doc = createDocument({
+    title: "Visual page",
+    body,
+    selectors: {
+      "#root": root,
+      main,
+      body,
+    },
+  });
+
+  const win = createWindow({
+    href: "https://example.com/visual",
+    hostname: "example.com",
+    pathname: "/visual",
+  });
+
+  const result = extractPageContext(win, doc);
+  assert.equal(result.metadata.pageBackgroundColor, "rgb(245, 247, 250)");
+  assert.match(result.metadata.pageBackgroundImage, /linear-gradient/);
+  assert.equal(result.metadata.pageColorScheme, "light");
+});
+
 test("Gmail 线程页会识别正文和可写回复框", () => {
   const replyBox = createNode({
     tagName: "DIV",
@@ -448,11 +509,28 @@ test("interactiveSummary 会按页面位置稳定排序并过滤隐藏元素", (
   assert.equal(result.interactiveSummary.includes("Hidden action"), false);
 });
 
-function createDocument({ title, activeElement = null, body = null, selectors = {}, selectorAll = {} }) {
+function createDocument({
+  title,
+  activeElement = null,
+  body = null,
+  documentElement = null,
+  selectors = {},
+  selectorAll = {},
+}) {
+  const resolvedBody = body ?? selectors.body ?? null;
+  const resolvedDocumentElement =
+    documentElement ??
+    (resolvedBody
+      ? createNode({
+          tagName: "HTML",
+        })
+      : null);
+
   return {
     title,
     activeElement,
-    body: body ?? selectors.body ?? null,
+    body: resolvedBody,
+    documentElement: resolvedDocumentElement,
     querySelector(selector) {
       return selectors[selector] ?? null;
     },
@@ -528,6 +606,9 @@ function createWindow({ href, hostname, pathname, selection = "" }) {
         display: "block",
         visibility: "visible",
         opacity: "1",
+        backgroundColor: "rgba(0, 0, 0, 0)",
+        backgroundImage: "none",
+        colorScheme: "normal",
       };
     },
   };

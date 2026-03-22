@@ -21,6 +21,7 @@ let currentDrawerState = {
   showPageInfo: true,
   showStatusInfo: true,
   followSafariWindow: true,
+  followPageColor: true,
   customSystemPrompt: "",
 };
 let currentContext = null;
@@ -211,6 +212,12 @@ function sdToggleFollowSafariWindow() {
   });
 }
 
+function sdToggleFollowPageColor() {
+  sdPost("save-follow-page-color-settings", {
+    followPageColor: !currentDrawerState.followPageColor,
+  });
+}
+
 document
   .getElementById("sd-login-codex")
   .addEventListener("click", () => sdPost("start-codex-login"));
@@ -256,6 +263,9 @@ document
 document
   .getElementById("sd-follow-safari-window")
   .addEventListener("click", () => sdToggleFollowSafariWindow());
+document
+  .getElementById("sd-follow-page-color")
+  .addEventListener("click", () => sdToggleFollowPageColor());
 
 syncSystemPromptButtons();
 
@@ -271,6 +281,7 @@ function renderSettingsDrawerState(payload) {
     showPageInfo: payload.showPageInfo !== false,
     showStatusInfo: payload.showStatusInfo !== false,
     followSafariWindow: payload.followSafariWindow !== false,
+    followPageColor: payload.followPageColor !== false,
     customSystemPrompt: payload.customSystemPrompt || "",
   };
   el("sd-codex-email").textContent = payload.codexEmail || "未登录";
@@ -307,6 +318,8 @@ function renderSettingsDrawerState(payload) {
     currentDrawerState.showStatusInfo ? "true" : "false";
   el("sd-follow-safari-window").dataset.active =
     currentDrawerState.followSafariWindow ? "true" : "false";
+  el("sd-follow-page-color").dataset.active =
+    currentDrawerState.followPageColor ? "true" : "false";
 
   el("sd-status").textContent =
     payload.settingsStatus && payload.settingsStatus !== "Ready"
@@ -411,10 +424,105 @@ function renderPanelState(payload) {
   if (settings.drawerState) {
     renderSettingsDrawerState(settings.drawerState);
   }
+  applyPageVisualState(context?.metadata || {});
 }
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme || "blue";
+}
+
+function applyPageVisualState(metadata) {
+  if (!currentDrawerState.followPageColor) {
+    clearPageVisualState();
+    return;
+  }
+
+  const backgroundColor = normalizeVisualValue(metadata?.pageBackgroundColor);
+  const backgroundImage = normalizeVisualValue(metadata?.pageBackgroundImage);
+  const schemeHint = normalizeAppearance(metadata?.pageColorScheme);
+  const appearance =
+    schemeHint || (backgroundColor ? inferAppearanceFromColor(backgroundColor) : "");
+
+  if (appearance) {
+    document.documentElement.dataset.pageAppearance = appearance;
+    document.documentElement.style.colorScheme = appearance;
+  } else {
+    delete document.documentElement.dataset.pageAppearance;
+    document.documentElement.style.removeProperty("color-scheme");
+  }
+
+  if (backgroundColor) {
+    applySurfacePalette(backgroundColor, appearance || "dark");
+    document.documentElement.style.setProperty(
+      "--page-background-color",
+      backgroundColor,
+    );
+  } else {
+    clearSurfacePalette();
+    document.documentElement.style.removeProperty("--page-background-color");
+  }
+
+  if (backgroundImage) {
+    document.documentElement.style.setProperty(
+      "--page-background-image",
+      backgroundImage === "none" ? "none" : backgroundImage,
+    );
+  } else {
+    document.documentElement.style.removeProperty("--page-background-image");
+  }
+}
+
+function clearPageVisualState() {
+  delete document.documentElement.dataset.pageAppearance;
+  document.documentElement.style.removeProperty("color-scheme");
+  clearSurfacePalette();
+  document.documentElement.style.removeProperty("--page-background-color");
+  document.documentElement.style.removeProperty("--page-background-image");
+}
+
+function applySurfacePalette(backgroundColor, appearance) {
+  const channels = parseColorChannels(backgroundColor);
+  if (!channels) {
+    return;
+  }
+
+  if (appearance === "light") {
+    const lowered = shiftColor(channels, -14);
+    const loweredStrong = shiftColor(channels, -24);
+    const raised = shiftColor(channels, 6);
+    document.documentElement.style.setProperty("--surface", rgbaString(raised, 0.78));
+    document.documentElement.style.setProperty("--surface-low", rgbaString(raised, 0.84));
+    document.documentElement.style.setProperty("--surface-high", rgbaString(lowered, 0.9));
+    document.documentElement.style.setProperty("--surface-soft", rgbaString(raised, 0.82));
+    document.documentElement.style.setProperty("--outline", "rgba(15, 23, 42, 0.12)");
+    document.documentElement.style.setProperty(
+      "--assistant-bubble-background",
+      `linear-gradient(135deg, ${rgbaString(raised, 0.94)} 0%, ${rgbaString(loweredStrong, 0.92)} 100%)`,
+    );
+    return;
+  }
+
+  const raisedSoft = shiftColor(channels, 10);
+  const raised = shiftColor(channels, 18);
+  const raisedStrong = shiftColor(channels, 26);
+  document.documentElement.style.setProperty("--surface", rgbaString(channels, 0.88));
+  document.documentElement.style.setProperty("--surface-low", rgbaString(raisedSoft, 0.86));
+  document.documentElement.style.setProperty("--surface-high", rgbaString(raisedStrong, 0.92));
+  document.documentElement.style.setProperty("--surface-soft", rgbaString(raised, 0.84));
+  document.documentElement.style.setProperty("--outline", "rgba(255, 255, 255, 0.1)");
+  document.documentElement.style.setProperty(
+    "--assistant-bubble-background",
+    `linear-gradient(135deg, ${rgbaString(raisedSoft, 0.94)} 0%, ${rgbaString(raisedStrong, 0.9)} 100%)`,
+  );
+}
+
+function clearSurfacePalette() {
+  document.documentElement.style.removeProperty("--surface");
+  document.documentElement.style.removeProperty("--surface-low");
+  document.documentElement.style.removeProperty("--surface-high");
+  document.documentElement.style.removeProperty("--surface-soft");
+  document.documentElement.style.removeProperty("--outline");
+  document.documentElement.style.removeProperty("--assistant-bubble-background");
 }
 
 function applyVisibility(settings) {
@@ -465,6 +573,76 @@ function syncSystemPromptButtons() {
 
 function normalizeSystemPrompt(value) {
   return String(value || "").trim().slice(0, 4000);
+}
+
+function normalizeVisualValue(value) {
+  const normalized = String(value || "").trim();
+  return normalized && normalized !== "null" && normalized !== "undefined"
+    ? normalized
+    : "";
+}
+
+function normalizeAppearance(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "light" || normalized === "dark") {
+    return normalized;
+  }
+  return "";
+}
+
+function inferAppearanceFromColor(value) {
+  const channels = parseColorChannels(value);
+  if (!channels) {
+    return "dark";
+  }
+
+  const luminance =
+    (0.2126 * channels.red + 0.7152 * channels.green + 0.0722 * channels.blue) /
+    255;
+  return luminance >= 0.6 ? "light" : "dark";
+}
+
+function parseColorChannels(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const rgbMatch = normalized.match(
+    /^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)(?:\s*[/,]\s*([0-9.]+))?\s*\)$/,
+  );
+
+  if (rgbMatch) {
+    return {
+      red: Number.parseFloat(rgbMatch[1]),
+      green: Number.parseFloat(rgbMatch[2]),
+      blue: Number.parseFloat(rgbMatch[3]),
+    };
+  }
+
+  const hexMatch = normalized.match(/^#([0-9a-f]{6})$/i);
+  if (!hexMatch) {
+    return null;
+  }
+
+  const hex = hexMatch[1];
+  return {
+    red: Number.parseInt(hex.slice(0, 2), 16),
+    green: Number.parseInt(hex.slice(2, 4), 16),
+    blue: Number.parseInt(hex.slice(4, 6), 16),
+  };
+}
+
+function shiftColor(channels, amount) {
+  return {
+    red: clampColor(channels.red + amount),
+    green: clampColor(channels.green + amount),
+    blue: clampColor(channels.blue + amount),
+  };
+}
+
+function clampColor(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function rgbaString(channels, alpha) {
+  return `rgba(${channels.red}, ${channels.green}, ${channels.blue}, ${alpha})`;
 }
 
 function bindModels(models, selectedModel) {

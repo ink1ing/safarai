@@ -22,6 +22,9 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.wantsLayer = true
+        webView.layer?.backgroundColor = NSColor.clear.cgColor
         webView.navigationDelegate = self
         webView.configuration.userContentController.add(self, name: "controller")
         NotificationCenter.default.addObserver(
@@ -159,6 +162,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 try saveFollowSafariWindowSetting(body["followSafariWindow"] as? Bool)
                 pushPanelState(status: "Safari 跟随吸附已更新。")
                 safariWindowFollower?.refreshMode()
+            } catch {
+                pushError(error.localizedDescription)
+            }
+        case "save-follow-page-color-settings":
+            do {
+                try saveFollowPageColorSetting(body["followPageColor"] as? Bool)
+                pushPanelState(status: "页面颜色跟随已更新。")
             } catch {
                 pushError(error.localizedDescription)
             }
@@ -545,6 +555,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "showPageInfo": loadShowPageInfo(),
             "showStatusInfo": loadShowStatusInfo(),
             "followSafariWindow": loadFollowSafariWindow(),
+            "followPageColor": loadFollowPageColor(),
             "customSystemPrompt": loadCustomSystemPrompt(),
             "settingsStatus": jsonValue(status ?? snapshot?.status)
         ]
@@ -567,10 +578,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 "title": jsonValue(snapshot?.context?.title),
                 "selection": jsonValue(snapshot?.context?.selection),
                 "selectionFocusText": jsonValue(selectionIntent?.selection),
-                "selectionDebug": debugSelection
+                "selectionDebug": debugSelection,
+                "metadata": snapshot?.context?.metadata ?? [:],
+                "updatedAt": jsonValue(snapshot?.updatedAt)
             ],
             "messages": snapshot?.messages.map { ["role": $0.role, "kind": $0.kind, "text": $0.text] } ?? [],
             "status": jsonValue(status ?? snapshot?.status),
+            "updatedAt": jsonValue(snapshot?.updatedAt),
             "isStreaming": responseTask != nil
         ]
 
@@ -664,6 +678,12 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         try writeUISettings(payload)
     }
 
+    private func saveFollowPageColorSetting(_ rawValue: Bool?) throws {
+        var payload = normalizedUISettings(loadUISettings())
+        payload["follow_page_color"] = rawValue ?? true
+        try writeUISettings(payload)
+    }
+
     private func resetCustomSystemPrompt() throws {
         try saveCustomSystemPrompt("")
     }
@@ -706,6 +726,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private func loadFollowSafariWindow() -> Bool {
         normalizedUISettings(loadUISettings())["follow_safari_window"] as? Bool ?? true
+    }
+
+    private func loadFollowPageColor() -> Bool {
+        normalizedUISettings(loadUISettings())["follow_page_color"] as? Bool ?? true
     }
 
     private func resolvedActiveProvider(
@@ -804,6 +828,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "show_page_info": payload["show_page_info"] as? Bool ?? true,
             "show_status_info": payload["show_status_info"] as? Bool ?? true,
             "follow_safari_window": payload["follow_safari_window"] as? Bool ?? true,
+            "follow_page_color": payload["follow_page_color"] as? Bool ?? true,
             "custom_system_prompt": normalizeCustomSystemPrompt(payload["custom_system_prompt"] as? String)
         ]
     }

@@ -1,5 +1,3 @@
-import { createRequest } from "./protocol.js";
-
 const conversationList = document.getElementById("conversation-list");
 const conversationStatus = document.getElementById("conversation-status");
 const questionEditor = document.getElementById("question-editor");
@@ -15,6 +13,7 @@ let loginPollTimer = null;
 let didAutoRefreshModels = false;
 let currentSelection = "";
 let pageContextReady = false;
+const protocolModulePromise = loadProtocolModule();
 
 askPageButton.addEventListener("click", sendQuestion);
 authToggle.addEventListener("click", handleAuthToggle);
@@ -257,6 +256,7 @@ function bindModelSelect(models, selected) {
 
 async function sendNativeControlRequest(type, payload = {}) {
   try {
+    const { createRequest } = await protocolModulePromise;
     const response = await browser.runtime.sendNativeMessage(createRequest(type, payload));
     if (!response?.ok) {
       return response;
@@ -271,6 +271,14 @@ async function sendNativeControlRequest(type, payload = {}) {
       },
     };
   }
+}
+
+async function loadProtocolModule() {
+  const runtimeGetURL =
+    typeof browser?.runtime?.getURL === "function"
+      ? browser.runtime.getURL.bind(browser.runtime)
+      : (path) => path;
+  return import(runtimeGetURL("protocol.js"));
 }
 
 function scheduleLoginPoll() {

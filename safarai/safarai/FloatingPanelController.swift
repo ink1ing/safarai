@@ -9,6 +9,9 @@ final class FloatingPanelController: NSWindowController, WKScriptMessageHandler 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(FloatingPanelMessageProxy.shared, name: "controller")
         self.webView = WKWebView(frame: .zero, configuration: configuration)
+        self.webView.setValue(false, forKey: "drawsBackground")
+        self.webView.wantsLayer = true
+        self.webView.layer?.backgroundColor = NSColor.clear.cgColor
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 780),
@@ -23,6 +26,8 @@ final class FloatingPanelController: NSWindowController, WKScriptMessageHandler 
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.minSize = NSSize(width: 360, height: 560)
         panel.setFrameAutosaveName("FloatingChatPanel")
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.contentView = webView
 
         super.init(window: panel)

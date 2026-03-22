@@ -10,14 +10,16 @@
 
 :root {
     color-scheme: dark;
-    --background: #1a1a1e;
-    --surface: #1a1a1e;
-    --surface-low: #242429;
-    --surface-high: #3a3a3f;
-    --surface-soft: #2c2c32;
+    --page-background-color: #1a1a1e;
+    --page-background-image: none;
+    --background: var(--page-background-color);
+    --surface: rgba(26, 26, 30, 0.82);
+    --surface-low: rgba(36, 36, 41, 0.8);
+    --surface-high: rgba(58, 58, 63, 0.88);
+    --surface-soft: rgba(44, 44, 50, 0.86);
     --text-primary: #e0e0e6;
     --text-muted: #8c8c96;
-    --outline: #44444a;
+    --outline: rgba(255, 255, 255, 0.1);
     --primary: #4a90e2;
     --primary-strong: #357abd;
     --primary-soft: rgba(74, 144, 226, 0.16);
@@ -30,6 +32,19 @@
     --danger: #ff5f57;
     --warning: #ffbd2e;
     --success: #28c840;
+    --assistant-bubble-background: linear-gradient(135deg, #242429 0%, #1e1e23 100%);
+}
+
+html[data-page-appearance="light"] {
+    color-scheme: light;
+    --background: var(--page-background-color);
+    --surface: rgba(255, 255, 255, 0.72);
+    --surface-low: rgba(255, 255, 255, 0.78);
+    --surface-high: rgba(255, 255, 255, 0.92);
+    --surface-soft: rgba(255, 255, 255, 0.82);
+    --text-primary: #141824;
+    --text-muted: #667085;
+    --outline: rgba(15, 23, 42, 0.12);
 }
 
 html[data-theme="orange"] {
@@ -99,7 +114,11 @@ body {
         "SF Pro Text",
         "PingFang SC",
         sans-serif;
-    background-color: var(--background);
+    background-color: var(--page-background-color);
+    background-image: var(--page-background-image);
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
 }
 
 .noise-overlay {
@@ -128,7 +147,7 @@ body {
 .context-pane {
     backdrop-filter: blur(25px) saturate(180%);
     -webkit-backdrop-filter: blur(25px) saturate(180%);
-    background-color: rgba(26, 26, 30, 0.8);
+    background-color: var(--surface);
 }
 
 .nav-drawer {
@@ -318,7 +337,7 @@ body {
 
 .conversation-item[data-role="assistant"] .message-markdown,
 .conversation-item[data-role="assistant"] .message-plain {
-    background: linear-gradient(135deg, #242429 0%, #1e1e23 100%);
+    background: var(--assistant-bubble-background);
     border: 0.5px solid rgba(255, 255, 255, 0.1);
     box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.03);
 }

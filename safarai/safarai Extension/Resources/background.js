@@ -191,7 +191,20 @@ async function syncPanelStateFromContent(tabId, context) {
 
   TAB_STATE.set(
     resolvedTabId,
-    mergeStableSelection(TAB_STATE.get(resolvedTabId), context, "content:page-updated")
+    mergeStableSelection(
+      TAB_STATE.get(resolvedTabId),
+      {
+        ...context,
+        metadata: {
+          ...(context.metadata ?? {}),
+          pageContextTransport: "content_event",
+          pageContextUpdatedAt: new Date().toISOString(),
+          pageContextFallbackReason: "",
+          pageContextError: "",
+        },
+      },
+      "content:page-updated"
+    )
   );
   await syncPanelState(resolvedTabId, TAB_STATE.get(resolvedTabId));
   return createSuccessResponse({ synced: true });
@@ -574,6 +587,7 @@ async function requestFocusedInputPreparation(tabId) {
 
 async function requestPageContext(tabId) {
   const tab = await browser.tabs.get(tabId).catch(() => null);
+  const cachedContext = TAB_STATE.get(tabId) ?? null;
 
   try {
     const response = await browser.tabs.sendMessage(tabId, {
@@ -581,18 +595,26 @@ async function requestPageContext(tabId) {
     });
 
     if (!response?.ok) {
-      return createSuccessResponse({
-        context: buildFallbackContext(tab),
-        degraded: true,
-      });
+      return createSuccessResponse(
+        buildDegradedContextPayload(
+          tab,
+          cachedContext,
+          response?.error?.code ?? "content_script_error",
+          response?.error?.message ?? "content script returned a non-ok response"
+        )
+      );
     }
 
     const context = response.payload?.context;
     if (!context) {
-      return createSuccessResponse({
-        context: buildFallbackContext(tab),
-        degraded: true,
-      });
+      return createSuccessResponse(
+        buildDegradedContextPayload(
+          tab,
+          cachedContext,
+          "content_context_missing",
+          "content script responded without context payload"
+        )
+      );
     }
 
     const normalizedSite = isSupportedSite(context.site) ? context.site : "unsupported";
@@ -600,17 +622,64 @@ async function requestPageContext(tabId) {
       context: {
         ...context,
         site: normalizedSite,
+        metadata: {
+          ...(context.metadata ?? {}),
+          pageContextTransport: "content_script",
+          pageContextUpdatedAt: new Date().toISOString(),
+          pageContextFallbackReason: "",
+          pageContextError: "",
+        },
       },
     });
   } catch (error) {
-    return createSuccessResponse({
-      context: buildFallbackContext(tab),
-      degraded: true,
-    });
+    return createSuccessResponse(
+      buildDegradedContextPayload(
+        tab,
+        cachedContext,
+        "content_script_unreachable",
+        error?.message ?? String(error)
+      )
+    );
   }
 }
 
-function buildFallbackContext(tab) {
+function buildDegradedContextPayload(tab, cachedContext, reason, errorMessage) {
+  const cachedURL = String(cachedContext?.url ?? "");
+  const tabURL = String(tab?.url ?? "");
+  const canReuseCachedContext =
+    cachedContext &&
+    cachedURL &&
+    tabURL &&
+    cachedURL === tabURL &&
+    cachedContext.metadata?.pageKind !== "fallback_tab_context";
+
+  if (canReuseCachedContext) {
+    return {
+      context: {
+        ...cachedContext,
+        metadata: {
+          ...(cachedContext.metadata ?? {}),
+          pageContextTransport: "cached_context",
+          pageContextUpdatedAt:
+            cachedContext.metadata?.pageContextUpdatedAt ?? new Date().toISOString(),
+          pageContextFallbackReason: String(reason ?? ""),
+          pageContextError: String(errorMessage ?? ""),
+        },
+      },
+      degraded: true,
+    };
+  }
+
+  return {
+    context: buildFallbackContext(tab, {
+      reason,
+      errorMessage,
+    }),
+    degraded: true,
+  };
+}
+
+function buildFallbackContext(tab, debug = {}) {
   const url = String(tab?.url ?? "");
   const title = String(tab?.title ?? "当前页面");
 
@@ -638,6 +707,10 @@ function buildFallbackContext(tab) {
       domain,
       pageKind: "fallback_tab_context",
       contentStrategy: "fallback_tab_context",
+      pageContextTransport: "fallback_tab_context",
+      pageContextUpdatedAt: new Date().toISOString(),
+      pageContextFallbackReason: String(debug.reason ?? ""),
+      pageContextError: String(debug.errorMessage ?? ""),
       headingCount: "0",
       interactiveCount: "0",
       tableCount: "0",
