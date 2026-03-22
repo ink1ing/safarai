@@ -36,11 +36,88 @@ final class CodexResponseService {
 
     // MARK: - Public API (streaming)
 
+    func createAgentResponse(
+        input: [[String: Any]],
+        tools: [[String: Any]]
+    ) async throws -> [String: Any] {
+        guard var configuration = CodexAccountStore.load() else {
+            throw CodexResponseError.notLoggedIn
+        }
+        configuration = try await CodexOAuthService.shared.refreshIfNeeded(configuration)
+
+        let body: [String: Any] = [
+            "model": "gpt-5.4",
+            "input": input,
+            "tools": tools,
+            "tool_choice": "auto",
+            "stream": true,
+            "store": false,
+            "parallel_tool_calls": false,
+            "reasoning": ["effort": "medium", "summary": "auto"],
+            "instructions": """
+你是 Safari 页内 agent。必须优先通过工具获取页面事实，再决定动作。
+只能使用当前提供的白名单工具，不能假设工具之外的能力。
+如需点击、导航、聚焦、写入等高风险动作，可以先提出工具调用；宿主会进行确认。
+禁止自动提交、禁止绕过确认、禁止编造页面状态。
+""",
+        ]
+
+        var request = URLRequest(url: baseURL.appendingPathComponent("responses"))
+        request.httpMethod = "POST"
+        request.allHTTPHeaderFields = [
+            "Content-Type": "application/json",
+            "Authorization": "Bearer \(configuration.tokens.accessToken)",
+            "Accept": "text/event-stream",
+            "Connection": "Keep-Alive",
+            "Openai-Beta": "responses=experimental",
+            "User-Agent": "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
+            "Originator": "codex_cli_rs",
+            "Version": "0.21.0",
+            "Chatgpt-Account-Id": configuration.account.accountId,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body.filterNilValues())
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw CodexResponseError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            var bodyData = Data()
+            for try await byte in asyncBytes { bodyData.append(byte) }
+            let message = String(data: bodyData, encoding: .utf8) ?? "unknown"
+            throw CodexResponseError.upstreamStatus(http.statusCode, message)
+        }
+
+        var lineBuffer = Data()
+        var completedResponse: [String: Any]?
+        for try await byte in asyncBytes {
+            if byte == UInt8(ascii: "\n") {
+                if let line = String(data: lineBuffer, encoding: .utf8),
+                   let completed = parseCompletedAgentLine(line) {
+                    completedResponse = completed
+                }
+                lineBuffer.removeAll(keepingCapacity: true)
+            } else {
+                lineBuffer.append(byte)
+            }
+        }
+        if !lineBuffer.isEmpty,
+           let line = String(data: lineBuffer, encoding: .utf8),
+           let completed = parseCompletedAgentLine(line) {
+            completedResponse = completed
+        }
+        guard let completedResponse else {
+            throw CodexResponseError.invalidResponse
+        }
+        return completedResponse
+    }
+
     func streamQuestion(
         prompt: String,
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
-        selectedFocus: String = ""
+        selectedFocus: String = "",
+        attachments: [PanelAttachment] = []
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -54,6 +131,7 @@ final class CodexResponseService {
                         context: context,
                         history: history,
                         selectedFocus: selectedFocus,
+                        attachments: attachments,
                         configuration: configuration,
                         attempt: 0,
                         continuation: continuation
@@ -73,6 +151,7 @@ final class CodexResponseService {
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
         selectedFocus: String,
+        attachments: [PanelAttachment],
         configuration: CodexAccountConfiguration,
         attempt: Int,
         continuation: AsyncThrowingStream<String, Error>.Continuation
@@ -82,6 +161,7 @@ final class CodexResponseService {
             context: context,
             history: history,
             selectedFocus: selectedFocus,
+            attachments: attachments,
             model: configuration.model.selected
         )
 
@@ -115,6 +195,7 @@ final class CodexResponseService {
                 context: context,
                 history: history,
                 selectedFocus: selectedFocus,
+                attachments: attachments,
                 configuration: configuration,
                 attempt: attempt + 1,
                 continuation: continuation
@@ -130,6 +211,7 @@ final class CodexResponseService {
         }
 
         var receivedAny = false
+        var sawTextDelta = false
         // Buffer raw bytes and decode as UTF-8 per line to avoid mojibake
         // that occurs when treating each byte as a Character (UnicodeScalar).
         var lineBuffer = Data()
@@ -137,7 +219,7 @@ final class CodexResponseService {
         for try await byte in asyncBytes {
             if byte == UInt8(ascii: "\n") {
                 if let line = String(data: lineBuffer, encoding: .utf8) {
-                    if let chunk = parseLine(line) {
+                    if let chunk = parseLine(line, sawTextDelta: &sawTextDelta) {
                         continuation.yield(chunk)
                         receivedAny = true
                     }
@@ -150,7 +232,7 @@ final class CodexResponseService {
         // Handle trailing line without newline
         if !lineBuffer.isEmpty,
            let line = String(data: lineBuffer, encoding: .utf8),
-           let chunk = parseLine(line) {
+           let chunk = parseLine(line, sawTextDelta: &sawTextDelta) {
             continuation.yield(chunk)
             receivedAny = true
         }
@@ -162,7 +244,7 @@ final class CodexResponseService {
 
     // MARK: - Line Parser
 
-    private func parseLine(_ raw: String) -> String? {
+    private func parseLine(_ raw: String, sawTextDelta: inout Bool) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("data:") else { return nil }
         let value = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -173,6 +255,7 @@ final class CodexResponseService {
         // response.output_text.delta (primary streaming event)
         if let type = json["type"] as? String {
             if type == "response.output_text.delta", let delta = json["delta"] as? String, !delta.isEmpty {
+                sawTextDelta = true
                 return delta
             }
             if type == "response.output_text.done", let text = json["text"] as? String, !text.isEmpty {
@@ -181,18 +264,22 @@ final class CodexResponseService {
             // response.completed fallback: extract full text if no deltas arrived
             if type == "response.completed",
                let response = json["response"] as? [String: Any],
-               let text = parseCompletedResponse(response), !text.isEmpty {
+               let text = parseCompletedResponse(response), !text.isEmpty,
+               !sawTextDelta {
                 return text
             }
             // Legacy delta format
             if type.contains("output_text") {
-                if let delta = json["delta"] as? String, !delta.isEmpty { return delta }
-                if let text = json["text"] as? String, !text.isEmpty { return text }
+                if let delta = json["delta"] as? String, !delta.isEmpty {
+                    sawTextDelta = true
+                    return delta
+                }
+                if let text = json["text"] as? String, !text.isEmpty, !sawTextDelta { return text }
             }
         }
 
         // Fallback: top-level output_text
-        if let outputText = json["output_text"] as? String, !outputText.isEmpty {
+        if let outputText = json["output_text"] as? String, !outputText.isEmpty, !sawTextDelta {
             return outputText
         }
 
@@ -221,6 +308,28 @@ final class CodexResponseService {
         return value.isEmpty ? nil : value
     }
 
+    private func parseCompletedAgentLine(_ raw: String) -> [String: Any]? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("data:") else { return nil }
+        let value = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value != "[DONE]", !value.isEmpty else { return nil }
+        guard let data = value.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+
+        if let type = json["type"] as? String,
+           type == "response.completed",
+           let response = json["response"] as? [String: Any] {
+            return response
+        }
+
+        if let response = json["response"] as? [String: Any],
+           json["type"] as? String == "response.output_item.done" {
+            return response
+        }
+
+        return nil
+    }
+
     // MARK: - Request Builder
 
     private func buildRequestBody(
@@ -228,6 +337,7 @@ final class CodexResponseService {
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
         selectedFocus: String,
+        attachments: [PanelAttachment],
         model: String
     ) -> [String: Any] {
         let instructions = appendCustomSystemPrompt(
@@ -255,12 +365,25 @@ final class CodexResponseService {
         }
 
         if !history.isEmpty {
-            let historyText = history.suffix(6).map { "[\($0.role)/\($0.kind)] \($0.text)" }.joined(separator: "\n")
+            let historyText = history.suffix(6).map { message in
+                let attachmentSummary = summarizeAttachments(message.attachments)
+                return "[\(message.role)/\(message.kind)] \(message.text)\(attachmentSummary)"
+            }.joined(separator: "\n")
             sections.append("recent_conversation:\n\(historyText)")
         }
 
         sections.append("user_prompt: \(prompt)")
         let finalPrompt = sections.joined(separator: "\n\n")
+        var content: [[String: Any]] = [["type": "input_text", "text": finalPrompt]]
+        content += attachments.compactMap { attachment in
+            guard attachment.kind == "image", attachment.mimeType.hasPrefix("image/") else {
+                return nil
+            }
+            return [
+                "type": "input_image",
+                "image_url": attachment.dataURL
+            ]
+        }
 
         return [
             "model": model,
@@ -268,7 +391,7 @@ final class CodexResponseService {
                 [
                     "type": "message",
                     "role": "user",
-                    "content": [["type": "input_text", "text": finalPrompt]],
+                    "content": content,
                 ]
             ],
             "instructions": instructions,
@@ -278,5 +401,23 @@ final class CodexResponseService {
             "reasoning": ["effort": "medium", "summary": "auto"],
             "include": ["reasoning.encrypted_content"],
         ]
+    }
+
+    private func summarizeAttachments(_ attachments: [PanelAttachment]?) -> String {
+        let imageNames = (attachments ?? []).filter { $0.kind == "image" }.map(\.filename)
+        guard !imageNames.isEmpty else {
+            return ""
+        }
+        return " [attachments: \(imageNames.joined(separator: ", "))]"
+    }
+}
+
+private extension Dictionary where Key == String, Value == Any {
+    func filterNilValues() -> [String: Any] {
+        reduce(into: [String: Any]()) { result, item in
+            if !(item.value is NSNull) {
+                result[item.key] = item.value
+            }
+        }
     }
 }

@@ -94,7 +94,20 @@ final class FloatingPanelController: NSWindowController, WKScriptMessageHandler 
 
         if command == "reload-panel-state" {
             pushState()
+        } else if command == "copy-message" {
+            copyMessage(body["text"] as? String)
         }
+    }
+
+    private func copyMessage(_ rawText: String?) {
+        let text = (rawText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func loadUI() {

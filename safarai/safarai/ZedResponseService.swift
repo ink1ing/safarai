@@ -65,7 +65,8 @@ final class ZedResponseService {
         prompt: String,
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
-        selectedFocus: String = ""
+        selectedFocus: String = "",
+        attachments: [PanelAttachment] = []
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -80,6 +81,7 @@ final class ZedResponseService {
                         context: context,
                         history: history,
                         selectedFocus: selectedFocus,
+                        attachments: attachments,
                         model: model,
                         configuration: configuration,
                         llmToken: llmToken,
@@ -214,6 +216,7 @@ final class ZedResponseService {
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
         selectedFocus: String,
+        attachments: [PanelAttachment],
         model: ZedModelSummary,
         configuration: ZedAccountConfiguration,
         llmToken: String,
@@ -223,12 +226,22 @@ final class ZedResponseService {
         let systemPrompt = appendCustomSystemPrompt(
             basePrompt: "你是集成在 Safari 页面里的中文助理。回答必须简洁、准确、面向当前页面任务，不要编造页面中不存在的信息。若有页面选中内容，请优先解释选中内容，再结合整页内容回答。"
         )
-        let finalPrompt = buildPrompt(prompt: prompt, context: context, history: history, selectedFocus: selectedFocus)
+        let finalPrompt = buildPrompt(
+            prompt: prompt,
+            context: context,
+            history: history,
+            selectedFocus: selectedFocus
+        )
 
         let bodyDict: [String: Any] = [
             "provider": model.provider,
             "model": model.id,
-            "provider_request": buildProviderRequest(model: model, prompt: finalPrompt, systemPrompt: systemPrompt)
+            "provider_request": buildProviderRequest(
+                model: model,
+                prompt: finalPrompt,
+                systemPrompt: systemPrompt,
+                attachments: attachments
+            )
         ]
 
         var request = URLRequest(url: URL(string: "https://cloud.zed.dev/completions")!)
@@ -257,6 +270,7 @@ final class ZedResponseService {
                 context: context,
                 history: history,
                 selectedFocus: selectedFocus,
+                attachments: attachments,
                 model: model,
                 configuration: configuration,
                 llmToken: freshToken,
@@ -278,6 +292,7 @@ final class ZedResponseService {
 
         let supportsStatusMessages = headers["x-zed-server-supports-status-messages"] != nil
         var receivedAny = false
+        var sawTextDelta = false
 
         // Read line by line from the byte stream.
         // Buffer raw bytes and decode as UTF-8 per line to avoid mojibake
@@ -286,7 +301,12 @@ final class ZedResponseService {
         for try await byte in asyncBytes {
             if byte == UInt8(ascii: "\n") {
                 if let line = String(data: lineBuffer, encoding: .utf8) {
-                    if let chunk = parseLine(line, provider: model.provider, supportsStatusMessages: supportsStatusMessages) {
+                    if let chunk = parseLine(
+                        line,
+                        provider: model.provider,
+                        supportsStatusMessages: supportsStatusMessages,
+                        sawTextDelta: &sawTextDelta
+                    ) {
                         continuation.yield(chunk)
                         receivedAny = true
                     }
@@ -299,7 +319,12 @@ final class ZedResponseService {
         // Handle any trailing line without newline
         if !lineBuffer.isEmpty {
             if let line = String(data: lineBuffer, encoding: .utf8),
-               let chunk = parseLine(line, provider: model.provider, supportsStatusMessages: supportsStatusMessages) {
+               let chunk = parseLine(
+                line,
+                provider: model.provider,
+                supportsStatusMessages: supportsStatusMessages,
+                sawTextDelta: &sawTextDelta
+               ) {
                 continuation.yield(chunk)
                 receivedAny = true
             }
@@ -312,7 +337,12 @@ final class ZedResponseService {
 
     // MARK: - Line Parser
 
-    private func parseLine(_ raw: String, provider: String, supportsStatusMessages: Bool) -> String? {
+    private func parseLine(
+        _ raw: String,
+        provider: String,
+        supportsStatusMessages: Bool,
+        sawTextDelta: inout Bool
+    ) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
@@ -333,12 +363,12 @@ final class ZedResponseService {
 
         if supportsStatusMessages {
             if let event = json["event"] as? [String: Any] {
-                return extractChunk(from: event, provider: provider)
+                return extractChunk(from: event, provider: provider, sawTextDelta: &sawTextDelta)
             }
             if json["status"] != nil { return nil }
         }
 
-        return extractChunk(from: json, provider: provider)
+        return extractChunk(from: json, provider: provider, sawTextDelta: &sawTextDelta)
     }
 
     // MARK: - Prompt Builder
@@ -376,7 +406,10 @@ final class ZedResponseService {
 
         if !history.isEmpty {
             let historyText = history.suffix(6)
-                .map { "[\($0.role)/\($0.kind)] \($0.text)" }
+                .map { message in
+                    let attachmentSummary = summarizeAttachments(message.attachments)
+                    return "[\(message.role)/\(message.kind)] \(message.text)\(attachmentSummary)"
+                }
                 .joined(separator: "\n")
             sections.append("recent_conversation:\n\(historyText)")
         }
@@ -390,7 +423,8 @@ final class ZedResponseService {
     private func buildProviderRequest(
         model: ZedModelSummary,
         prompt: String,
-        systemPrompt: String
+        systemPrompt: String,
+        attachments: [PanelAttachment]
     ) -> [String: Any] {
         switch model.provider {
         case "anthropic":
@@ -401,7 +435,7 @@ final class ZedResponseService {
                 "messages": [
                     [
                         "role": "user",
-                        "content": [["type": "text", "text": prompt]]
+                        "content": anthropicContent(prompt: prompt, attachments: attachments)
                     ]
                 ],
                 "system": systemPrompt
@@ -415,7 +449,7 @@ final class ZedResponseService {
                     [
                         "type": "message",
                         "role": "user",
-                        "content": [["type": "input_text", "text": prompt]]
+                        "content": openAIContent(prompt: prompt, attachments: attachments)
                     ]
                 ],
                 "instructions": systemPrompt
@@ -425,7 +459,7 @@ final class ZedResponseService {
                 "model": model.id,
                 "stream": true,
                 "contents": [
-                    ["role": "user", "parts": [["text": prompt]]]
+                    ["role": "user", "parts": googleParts(prompt: prompt, attachments: attachments)]
                 ],
                 "systemInstruction": ["parts": [["text": systemPrompt]]],
                 "generationConfig": ["maxOutputTokens": 4096]
@@ -436,7 +470,7 @@ final class ZedResponseService {
                 "stream": true,
                 "messages": [
                     ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": prompt]
+                    ["role": "user", "content": xAIContent(prompt: prompt, attachments: attachments)]
                 ]
             ]
         default:
@@ -445,45 +479,140 @@ final class ZedResponseService {
                 "stream": true,
                 "messages": [
                     ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": prompt]
+                    ["role": "user", "content": xAIContent(prompt: prompt, attachments: attachments)]
                 ]
             ]
         }
     }
 
+    private func openAIContent(prompt: String, attachments: [PanelAttachment]) -> [[String: Any]] {
+        var content: [[String: Any]] = [["type": "input_text", "text": prompt]]
+        content += attachments.compactMap { attachment in
+            guard attachment.kind == "image", attachment.mimeType.hasPrefix("image/") else {
+                return nil
+            }
+            return [
+                "type": "input_image",
+                "image_url": attachment.dataURL
+            ]
+        }
+        return content
+    }
+
+    private func anthropicContent(prompt: String, attachments: [PanelAttachment]) -> [[String: Any]] {
+        var content: [[String: Any]] = [["type": "text", "text": prompt]]
+        content += attachments.compactMap { attachment in
+            guard attachment.kind == "image",
+                  attachment.mimeType.hasPrefix("image/"),
+                  let base64 = base64Payload(from: attachment.dataURL) else {
+                return nil
+            }
+            return [
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": attachment.mimeType,
+                    "data": base64
+                ]
+            ]
+        }
+        return content
+    }
+
+    private func googleParts(prompt: String, attachments: [PanelAttachment]) -> [[String: Any]] {
+        var parts: [[String: Any]] = [["text": prompt]]
+        parts += attachments.compactMap { attachment in
+            guard attachment.kind == "image",
+                  attachment.mimeType.hasPrefix("image/"),
+                  let base64 = base64Payload(from: attachment.dataURL) else {
+                return nil
+            }
+            return [
+                "inlineData": [
+                    "mimeType": attachment.mimeType,
+                    "data": base64
+                ]
+            ]
+        }
+        return parts
+    }
+
+    private func xAIContent(prompt: String, attachments: [PanelAttachment]) -> Any {
+        guard attachments.contains(where: { $0.kind == "image" && $0.mimeType.hasPrefix("image/") }) else {
+            return prompt
+        }
+
+        var content: [[String: Any]] = [["type": "text", "text": prompt]]
+        content += attachments.compactMap { attachment in
+            guard attachment.kind == "image", attachment.mimeType.hasPrefix("image/") else {
+                return nil
+            }
+            return [
+                "type": "image_url",
+                "image_url": [
+                    "url": attachment.dataURL
+                ]
+            ]
+        }
+        return content
+    }
+
+    private func base64Payload(from dataURL: String) -> String? {
+        guard let commaIndex = dataURL.firstIndex(of: ",") else {
+            return nil
+        }
+        let prefix = dataURL[..<commaIndex]
+        guard prefix.contains(";base64") else {
+            return nil
+        }
+        return String(dataURL[dataURL.index(after: commaIndex)...])
+    }
+
+    private func summarizeAttachments(_ attachments: [PanelAttachment]?) -> String {
+        let imageNames = (attachments ?? []).filter { $0.kind == "image" }.map(\.filename)
+        guard !imageNames.isEmpty else {
+            return ""
+        }
+        return " [attachments: \(imageNames.joined(separator: ", "))]"
+    }
+
     // MARK: - Chunk Extractors
 
-    private func extractChunk(from json: [String: Any], provider: String) -> String? {
+    private func extractChunk(from json: [String: Any], provider: String, sawTextDelta: inout Bool) -> String? {
         switch provider {
-        case "anthropic": return extractAnthropicChunk(from: json)
-        case "open_ai":   return extractOpenAIChunk(from: json)
-        case "google":    return extractGoogleChunk(from: json)
-        case "x_ai":      return extractXAIChunk(from: json)
+        case "anthropic": return extractAnthropicChunk(from: json, sawTextDelta: &sawTextDelta)
+        case "open_ai":   return extractOpenAIChunk(from: json, sawTextDelta: &sawTextDelta)
+        case "google":    return extractGoogleChunk(from: json, sawTextDelta: &sawTextDelta)
+        case "x_ai":      return extractXAIChunk(from: json, sawTextDelta: &sawTextDelta)
         default:
-            return extractXAIChunk(from: json)
-                ?? extractAnthropicChunk(from: json)
-                ?? extractOpenAIChunk(from: json)
-                ?? extractGoogleChunk(from: json)
+            return extractXAIChunk(from: json, sawTextDelta: &sawTextDelta)
+                ?? extractAnthropicChunk(from: json, sawTextDelta: &sawTextDelta)
+                ?? extractOpenAIChunk(from: json, sawTextDelta: &sawTextDelta)
+                ?? extractGoogleChunk(from: json, sawTextDelta: &sawTextDelta)
         }
     }
 
-    private func extractAnthropicChunk(from json: [String: Any]) -> String? {
+    private func extractAnthropicChunk(from json: [String: Any], sawTextDelta: inout Bool) -> String? {
         guard let type = json["type"] as? String, type == "content_block_delta",
               let delta = json["delta"] as? [String: Any],
               delta["type"] as? String == "text_delta",
               let text = delta["text"] as? String, !text.isEmpty else { return nil }
+        sawTextDelta = true
         return text
     }
 
-    private func extractOpenAIChunk(from json: [String: Any]) -> String? {
+    private func extractOpenAIChunk(from json: [String: Any], sawTextDelta: inout Bool) -> String? {
         if let type = json["type"] as? String, type == "response.output_text.delta",
-           let delta = json["delta"] as? String, !delta.isEmpty { return delta }
+           let delta = json["delta"] as? String, !delta.isEmpty {
+            sawTextDelta = true
+            return delta
+        }
         if let type = json["type"] as? String, type == "response.output_text.done",
-           let text = json["text"] as? String, !text.isEmpty { return text }
+           let text = json["text"] as? String, !text.isEmpty, !sawTextDelta { return text }
         return nil
     }
 
-    private func extractGoogleChunk(from json: [String: Any]) -> String? {
+    private func extractGoogleChunk(from json: [String: Any], sawTextDelta: inout Bool) -> String? {
         guard let candidates = json["candidates"] as? [[String: Any]] else { return nil }
         var texts: [String] = []
         for candidate in candidates {
@@ -495,14 +624,18 @@ final class ZedResponseService {
             }
         }
         let combined = texts.joined()
+        if !combined.isEmpty {
+            sawTextDelta = true
+        }
         return combined.isEmpty ? nil : combined
     }
 
-    private func extractXAIChunk(from json: [String: Any]) -> String? {
+    private func extractXAIChunk(from json: [String: Any], sawTextDelta: inout Bool) -> String? {
         guard let choices = json["choices"] as? [[String: Any]],
               let first = choices.first,
               let delta = first["delta"] as? [String: Any],
               let content = delta["content"] as? String, !content.isEmpty else { return nil }
+        sawTextDelta = true
         return content
     }
 }

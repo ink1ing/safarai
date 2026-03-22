@@ -118,6 +118,29 @@ enum NativeRouter {
                     "synced": true,
                 ],
             ]
+        case "agent_poll_request":
+            return [
+                "ok": true,
+                "payload": [
+                    "request_id": requestId,
+                    "request": NativeAgentBridgeStore.claimPendingRequest() as Any,
+                ],
+            ]
+        case "agent_submit_result":
+            let bridgePayload = (payload["payload"] as? [String: Any]) ?? [:]
+            let bridgeRequestId = String(describing: bridgePayload["requestId"] ?? "")
+            let result = bridgePayload["result"] as? [String: Any] ?? [:]
+            guard !bridgeRequestId.isEmpty else {
+                return MockNativeRouter.error(code: "agent_result_missing_request_id", message: "缺少 requestId")
+            }
+            NativeAgentBridgeStore.submitResult(requestId: bridgeRequestId, result: result)
+            return [
+                "ok": true,
+                "payload": [
+                    "request_id": requestId,
+                    "submitted": true,
+                ],
+            ]
         default:
             let client = LocalProviderClient(config: config)
             do {

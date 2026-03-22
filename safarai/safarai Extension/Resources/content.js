@@ -30,6 +30,14 @@ browser.runtime.onMessage.addListener((message) => {
       return handleInteractiveTargetCommand("focus", message.payload);
     case "content:scroll-to-target":
       return handleInteractiveTargetCommand("scroll", message.payload);
+    case "content:click-target":
+      return handleClickTarget(message.payload);
+    case "content:read-target":
+      return handleReadTarget(message.payload);
+    case "content:fill-target":
+      return handleFillTarget(message.payload);
+    case "content:navigate-page":
+      return handleNavigatePage(message.payload);
     case "content:trigger-sync":
       scheduleBootstrapSync("background-trigger");
       return handleGetPageContext();
@@ -244,6 +252,98 @@ function handleInteractiveTargetCommand(action, payload = {}) {
           "",
       },
     });
+  })();
+}
+
+function handleClickTarget(payload = {}) {
+  return (async () => {
+    const {
+      createErrorResponse,
+      createSuccessResponse,
+      highlightElement,
+    } = await sharedModulesPromise;
+    const target = resolveInteractiveTarget(payload.targetId, payload.selectorHint);
+    if (!target) {
+      return createErrorResponse("target_not_found", "目标元素不存在或已失效");
+    }
+
+    target.scrollIntoView?.({
+      block: "center",
+      inline: "nearest",
+      behavior: "smooth",
+    });
+    highlightElement(target);
+    target.focus?.();
+    target.click?.();
+
+    return createSuccessResponse({
+      answer: "已点击目标元素。",
+      targetId: payload.targetId || "",
+    });
+  })();
+}
+
+function handleReadTarget(payload = {}) {
+  return (async () => {
+    const { createErrorResponse, createSuccessResponse } = await sharedModulesPromise;
+    const target = resolveInteractiveTarget(payload.targetId, payload.selectorHint);
+    if (!target) {
+      return createErrorResponse("target_not_found", "目标元素不存在或已失效");
+    }
+
+    const text = truncateDebugValue(target.innerText || target.textContent || "");
+    return createSuccessResponse({
+      answer: "已读取目标元素内容。",
+      text,
+      targetId: payload.targetId || "",
+    });
+  })();
+}
+
+function handleFillTarget(payload = {}) {
+  return (async () => {
+    const {
+      applyDraftToElement,
+      createErrorResponse,
+      createSuccessResponse,
+      highlightElement,
+      isWritableElement,
+    } = await sharedModulesPromise;
+    const target = resolveInteractiveTarget(payload.targetId, payload.selectorHint);
+    if (!target || !isWritableElement(target)) {
+      return createErrorResponse("write_target_not_found", "未找到可写入目标。");
+    }
+
+    const draft = String(payload.text ?? "");
+    const applied = applyDraftToElement(target, draft);
+    if (!applied) {
+      return createErrorResponse("write_failed", "写入目标失败。");
+    }
+    highlightElement(target);
+    return createSuccessResponse({
+      answer: "已写入目标输入框，未自动提交。",
+      targetId: payload.targetId || "",
+    });
+  })();
+}
+
+function handleNavigatePage(payload = {}) {
+  return (async () => {
+    const { createErrorResponse, createSuccessResponse } = await sharedModulesPromise;
+    const url = String(payload.url ?? "").trim();
+    if (!url) {
+      return createErrorResponse("missing_url", "缺少导航 URL。");
+    }
+
+    try {
+      window.location.assign(url);
+      return createSuccessResponse({
+        answer: "已请求页面导航。",
+        url,
+      });
+    } catch (error) {
+      return createErrorResponse("navigate_failed", error.message || "页面导航失败。");
+    }
   })();
 }
 

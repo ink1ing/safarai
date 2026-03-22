@@ -6,6 +6,17 @@ const contextSelectionText = document.getElementById("context-selection-text");
 const composerDivider = document.getElementById("composer-divider");
 const questionEditor = document.getElementById("question-editor");
 const askPageButton = document.getElementById("ask-page");
+const agentModeButton = document.getElementById("agent-mode-button");
+const agentCancelButton = document.getElementById("agent-cancel-button");
+const agentApprovalCard = document.getElementById("agent-approval-card");
+const agentApprovalPreview = document.getElementById("agent-approval-preview");
+const agentApproveButton = document.getElementById("agent-approve-button");
+const agentRejectButton = document.getElementById("agent-reject-button");
+const attachmentInput = document.getElementById("attachment-input");
+const attachmentButton = document.getElementById("attachment-button");
+const attachmentList = document.getElementById("attachment-list");
+const attachmentDropzone = document.getElementById("attachment-dropzone");
+const composerCard = document.querySelector(".composer-card");
 const historyButton = document.getElementById("refresh-context-button");
 const settingsButton = document.getElementById("settings-button");
 const settingsCloseButton = document.getElementById("settings-close-button");
@@ -32,8 +43,16 @@ let currentDrawerState = {
 let currentContext = null;
 let currentThreadId = "";
 let openHistoryMenuThreadId = "";
+let openHistoryMenuPinned = false;
+let editingHistoryThreadId = "";
+let currentHistoryThreads = [];
+let pendingAttachments = [];
+let dragDepth = 0;
+let agentModeEnabled = false;
 let systemPromptSavedValue = "";
 let systemPromptDirty = false;
+let copyFeedbackTimer = null;
+let copyFeedbackButton = null;
 
 const I18N = {
   en: {
@@ -72,6 +91,11 @@ const I18N = {
     explain_page: "Explain Page",
     translate_page: "Translate Page",
     give_suggestions: "Give Suggestions",
+    add_image: "Add Image",
+    agent_mode: "Agent",
+    drop_images: "Drop images here",
+    remove_image: "Remove image",
+    new_chat: "New Chat",
     default_location: "Default location",
     no_history: "No chat history yet",
     unknown_page: "Unknown page",
@@ -88,6 +112,8 @@ const I18N = {
     aria_settings: "Settings",
     aria_send: "Send",
     aria_stop: "Stop",
+    aria_copy_message: "Copy message",
+    copied: "Copied",
     system_prompt_placeholder: "Append a custom prompt after the built-in system prompt.",
   },
   zh: {
@@ -126,6 +152,11 @@ const I18N = {
     explain_page: "解释页面",
     translate_page: "翻译页面",
     give_suggestions: "给出建议",
+    add_image: "添加图片",
+    agent_mode: "智能体",
+    drop_images: "拖放图片到这里",
+    remove_image: "移除图片",
+    new_chat: "新对话",
     default_location: "默认位置",
     no_history: "暂无聊天记录",
     unknown_page: "未知页面",
@@ -142,6 +173,8 @@ const I18N = {
     aria_settings: "设置",
     aria_send: "发送",
     aria_stop: "终止",
+    aria_copy_message: "复制消息",
+    copied: "已复制",
     system_prompt_placeholder: "追加到内置 system prompt 后面的自定义提示。",
   },
 };
@@ -173,6 +206,40 @@ const STOP_ICON = `
   </svg>
 `;
 
+const COPY_ICON = `
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <rect x="9" y="9" width="10" height="10" rx="2"></rect>
+    <path d="M5 15V7a2 2 0 0 1 2-2h8"></path>
+  </svg>
+`;
+
+const COPIED_ICON = `
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="m5 12 4 4L19 6"></path>
+  </svg>
+`;
+
+const MAX_ATTACHMENT_COUNT = 6;
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
 modelSelect.addEventListener("change", () => {
   syncSelectedModelDisplay();
   webkit.messageHandlers.controller.postMessage({
@@ -180,6 +247,27 @@ modelSelect.addEventListener("change", () => {
     selectedModel: modelSelect.value,
     reasoningEffort: "medium",
   });
+});
+conversationList.addEventListener("click", async (event) => {
+  const copyButton = event.target.closest?.("[data-copy-message='true']");
+  if (!copyButton) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const text = String(copyButton._copyText || "").trim();
+  if (!text) {
+    return;
+  }
+
+  const copied = await copyTextToClipboard(text);
+  if (!copied) {
+    return;
+  }
+
+  showCopyFeedback(copyButton);
 });
 settingsButton.addEventListener("click", () => {
   closeHistoryDrawer();
@@ -234,6 +322,39 @@ askPageButton.addEventListener("click", () => {
   }
   sendQuestion();
 });
+attachmentButton.addEventListener("click", () => {
+  webkit.messageHandlers.controller.postMessage({
+    command: "pick-attachments",
+  });
+});
+attachmentInput.addEventListener("change", async (event) => {
+  const input = event.currentTarget;
+  const files = Array.from(input?.files || []);
+  await addAttachmentFiles(files);
+  if (input) {
+    input.value = "";
+  }
+});
+agentModeButton.addEventListener("click", () => {
+  agentModeEnabled = !agentModeEnabled;
+  syncAgentModeButton();
+  renderAgentPanel(null);
+});
+agentCancelButton.addEventListener("click", () => {
+  webkit.messageHandlers.controller.postMessage({
+    command: "cancel-agent",
+  });
+});
+agentApproveButton.addEventListener("click", () => {
+  webkit.messageHandlers.controller.postMessage({
+    command: "approve-agent-action",
+  });
+});
+agentRejectButton.addEventListener("click", () => {
+  webkit.messageHandlers.controller.postMessage({
+    command: "reject-agent-action",
+  });
+});
 questionEditor.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -245,18 +366,79 @@ questionEditor.addEventListener("keydown", (event) => {
   }
 });
 
+document.addEventListener("keydown", (event) => {
+  const isCopyShortcut =
+    (event.metaKey || event.ctrlKey) &&
+    !event.shiftKey &&
+    !event.altKey &&
+    event.key.toLowerCase() === "c";
+  if (!isCopyShortcut) {
+    return;
+  }
+
+  const selection = String(window.getSelection?.()?.toString?.() ?? "");
+  if (!selection.trim()) {
+    return;
+  }
+});
+
+for (const eventName of ["dragenter", "dragover"]) {
+  composerCard.addEventListener(eventName, (event) => {
+    if (!containsFileData(event)) {
+      return;
+    }
+    event.preventDefault();
+    dragDepth += eventName === "dragenter" ? 1 : 0;
+    setComposerDragState(true);
+  });
+}
+
+composerCard.addEventListener("dragleave", (event) => {
+  if (!containsFileData(event)) {
+    return;
+  }
+  event.preventDefault();
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) {
+    setComposerDragState(false);
+  }
+});
+
+composerCard.addEventListener("drop", async (event) => {
+  if (!containsFileData(event)) {
+    return;
+  }
+  event.preventDefault();
+  dragDepth = 0;
+  setComposerDragState(false);
+  const files = Array.from(event.dataTransfer?.files || []);
+  await addAttachmentFiles(files);
+});
+
 function sendQuestion(directPrompt, options = {}) {
-  const prompt = directPrompt || questionEditor.value.trim();
-  if (!prompt) {
+  const prompt = (directPrompt || questionEditor.value).trim();
+  if (!prompt && pendingAttachments.length === 0) {
     return;
   }
 
   questionEditor.value = "";
+  const attachments = pendingAttachments.map((attachment) => ({
+    id: attachment.id,
+    kind: attachment.kind,
+    filename: attachment.filename,
+    mimeType: attachment.mimeType,
+    dataURL: attachment.dataURL,
+    width: attachment.width ?? null,
+    height: attachment.height ?? null,
+  }));
+  pendingAttachments = [];
+  renderPendingAttachments();
   const selectedFocus = resolveSelectedFocus(options);
   webkit.messageHandlers.controller.postMessage({
-    command: "send-question",
+    command: agentModeEnabled ? "start-agent" : "send-question",
     prompt,
     selectedFocus,
+    attachments,
   });
 }
 
@@ -264,6 +446,157 @@ function stopCurrentResponse() {
   webkit.messageHandlers.controller.postMessage({
     command: "stop-response",
   });
+}
+
+async function addAttachmentFiles(files) {
+  const imageFiles = files
+    .filter((file) => file.type.startsWith("image/"))
+    .slice(0, Math.max(0, MAX_ATTACHMENT_COUNT - pendingAttachments.length));
+  if (!imageFiles.length) {
+    return;
+  }
+
+  const nextAttachments = [];
+  for (const file of imageFiles) {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      continue;
+    }
+    const attachment = await readImageAttachment(file);
+    if (attachment) {
+      nextAttachments.push(attachment);
+    }
+  }
+
+  if (!nextAttachments.length) {
+    return;
+  }
+
+  pendingAttachments = [...pendingAttachments, ...nextAttachments].slice(0, MAX_ATTACHMENT_COUNT);
+  renderPendingAttachments();
+}
+
+function appendPickedAttachments(attachments) {
+  const rawAttachments = Array.isArray(attachments)
+    ? attachments
+    : Array.isArray(attachments?.attachments)
+      ? attachments.attachments
+      : [];
+  const normalizedAttachments = rawAttachments
+        .filter((attachment) => attachment?.kind === "image" && attachment?.dataURL)
+        .map((attachment) => ({
+          id: String(attachment.id || `att_${Date.now()}_${Math.random().toString(16).slice(2)}`),
+          kind: "image",
+          filename: String(attachment.filename || "image"),
+          mimeType: String(attachment.mimeType || "image/png"),
+          dataURL: String(attachment.dataURL || ""),
+          width: Number.isFinite(Number(attachment.width)) ? Number(attachment.width) : null,
+          height: Number.isFinite(Number(attachment.height)) ? Number(attachment.height) : null,
+          sizeBytes: estimateDataURLBytes(String(attachment.dataURL || "")),
+        }));
+
+  if (!normalizedAttachments.length) {
+    return;
+  }
+
+  pendingAttachments = [...pendingAttachments, ...normalizedAttachments].slice(0, MAX_ATTACHMENT_COUNT);
+  renderPendingAttachments();
+}
+
+async function readImageAttachment(file) {
+  try {
+    const dataURL = await readFileAsDataURL(file);
+    const size = await readImageSize(dataURL);
+    return {
+      id: crypto.randomUUID ? crypto.randomUUID() : `att_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      kind: "image",
+      filename: file.name || "image",
+      mimeType: file.type || "image/png",
+      dataURL,
+      width: size?.width || null,
+      height: size?.height || null,
+      sizeBytes: file.size || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function readImageSize(dataURL) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = reject;
+    image.src = dataURL;
+  });
+}
+
+function renderPendingAttachments() {
+  attachmentList.innerHTML = "";
+  attachmentList.classList.toggle("is-hidden", pendingAttachments.length === 0);
+
+  for (const attachment of pendingAttachments) {
+    const chip = document.createElement("div");
+    chip.className = "attachment-chip";
+    chip.innerHTML = `
+      <button type="button" class="attachment-chip-remove" data-remove-attachment="${escapeHtml(attachment.id)}" aria-label="${escapeAttribute(t("remove_image"))}">×</button>
+      <img src="${escapeAttribute(attachment.dataURL)}" alt="${escapeAttribute(attachment.filename)}" />
+      <div class="attachment-chip-meta">
+        <span class="attachment-chip-name">${escapeHtml(attachment.filename)}</span>
+        <span class="attachment-chip-size">${formatAttachmentSize(attachment.sizeBytes)}</span>
+      </div>
+    `;
+    attachmentList.appendChild(chip);
+  }
+}
+
+attachmentList.addEventListener("click", (event) => {
+  const removeButton = event.target.closest?.("[data-remove-attachment]");
+  if (!removeButton) {
+    return;
+  }
+  const attachmentId = removeButton.dataset.removeAttachment || "";
+  pendingAttachments = pendingAttachments.filter((attachment) => attachment.id !== attachmentId);
+  renderPendingAttachments();
+});
+
+function setComposerDragState(isActive) {
+  composerCard.dataset.dragActive = isActive ? "true" : "false";
+  attachmentDropzone.classList.toggle("is-hidden", !isActive);
+}
+
+function containsFileData(event) {
+  const types = Array.from(event.dataTransfer?.types || []);
+  return types.includes("Files");
+}
+
+function formatAttachmentSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (value >= 1024) {
+    return `${Math.round(value / 1024)} KB`;
+  }
+  return `${value} B`;
+}
+
+function estimateDataURLBytes(dataURL) {
+  const commaIndex = dataURL.indexOf(",");
+  if (commaIndex === -1) {
+    return 0;
+  }
+  const base64 = dataURL.slice(commaIndex + 1);
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
 // MARK: - Settings Drawer
@@ -319,19 +652,21 @@ function closeHistoryDrawer() {
 
 // Close drawer when clicking outside of it
 document.addEventListener("click", (e) => {
+  const clickPath = typeof e.composedPath === "function" ? e.composedPath() : [];
+  const clickedInsideSettings =
+    clickPath.includes(settingsDrawer) || clickPath.includes(settingsButton);
+  const clickedInsideHistory =
+    clickPath.includes(historyDrawer) || clickPath.includes(historyButton);
+
   if (
     settingsDrawer.classList.contains("open") &&
-    !settingsDrawer.contains(e.target) &&
-    e.target !== settingsButton &&
-    !settingsButton.contains(e.target)
+    !clickedInsideSettings
   ) {
     closeSettingsDrawer();
   }
   if (
     historyDrawer.classList.contains("open") &&
-    !historyDrawer.contains(e.target) &&
-    e.target !== historyButton &&
-    !historyButton.contains(e.target)
+    !clickedInsideHistory
   ) {
     closeHistoryDrawer();
   }
@@ -594,6 +929,8 @@ function renderPanelState(payload) {
   const historyThreads = Array.isArray(payload?.historyThreads)
     ? payload.historyThreads
     : [];
+  const agent = payload?.agent && typeof payload.agent === "object" ? payload.agent : null;
+  currentHistoryThreads = historyThreads;
   currentContext = context;
   currentThreadId = String(payload?.currentThreadId || "");
   isStreamingResponse = !!payload?.isStreaming;
@@ -606,6 +943,8 @@ function renderPanelState(payload) {
 
   questionEditor.disabled = !settings.isLoggedIn || isStreamingResponse;
   askPageButton.disabled = !settings.isLoggedIn;
+  attachmentButton.disabled = !settings.isLoggedIn || isStreamingResponse;
+  attachmentInput.disabled = !settings.isLoggedIn || isStreamingResponse;
   historyButton.disabled = false;
   settingsButton.disabled = false;
   syncAskButton();
@@ -627,6 +966,7 @@ function renderPanelState(payload) {
   contextSelectionText.classList.toggle("is-hidden", !currentSelectionText);
   applyVisibility(settings);
   renderHistoryThreadList(historyThreads, currentThreadId);
+  renderAgentState(agent);
   applyPageVisualState(context?.metadata || {});
 }
 
@@ -740,6 +1080,7 @@ function syncAskButton() {
   askPageButton.classList.toggle("icon-button-danger", isStreamingResponse);
   askPageButton.classList.toggle("icon-button-primary", !isStreamingResponse);
   askPageButton.setAttribute("aria-label", isStreamingResponse ? t("aria_stop") : t("aria_send"));
+  askPageButton.setAttribute("title", isStreamingResponse ? t("aria_stop") : t("aria_send"));
   askPageButton.innerHTML = isStreamingResponse ? STOP_ICON : SEND_ICON;
 }
 
@@ -831,14 +1172,26 @@ function applyTranslations() {
   historyCloseButton.setAttribute("aria-label", t("aria_close_history"));
   historyButton.setAttribute("aria-label", t("aria_history"));
   settingsButton.setAttribute("aria-label", t("aria_settings"));
+  attachmentButton.setAttribute("aria-label", t("add_image"));
+  agentModeButton.setAttribute("aria-label", t("agent_mode"));
+  historyButton.setAttribute("title", t("aria_history"));
+  settingsButton.setAttribute("title", t("aria_settings"));
+  attachmentButton.setAttribute("title", t("add_image"));
+  agentModeButton.setAttribute("title", t("agent_mode"));
+  attachmentDropzone.textContent = t("drop_images");
+  renderPendingAttachments();
+  agentCancelButton.textContent = currentLanguage() === "zh" ? "取消" : "Cancel";
+  agentApproveButton.textContent = currentLanguage() === "zh" ? "确认" : "Approve";
+  agentRejectButton.textContent = currentLanguage() === "zh" ? "拒绝" : "Reject";
 
   const newChatLabel = newChatButton.querySelector("span:last-child");
   if (newChatLabel) {
-    newChatLabel.textContent = currentLanguage() === "zh" ? "新对话" : "New Chat";
+    newChatLabel.textContent = t("new_chat");
   }
-  newChatFooterButton.setAttribute("aria-label", currentLanguage() === "zh" ? "新对话" : "New Chat");
+  newChatFooterButton.setAttribute("aria-label", t("new_chat"));
+  newChatFooterButton.setAttribute("title", t("new_chat"));
 
-  const suggestionButtons = document.querySelectorAll(".suggestion-pill");
+  const suggestionButtons = document.querySelectorAll(".suggestion-pill[data-prompt]");
   if (suggestionButtons[0]) {
     suggestionButtons[0].textContent = t("explain_page");
     suggestionButtons[0].dataset.prompt =
@@ -854,6 +1207,22 @@ function applyTranslations() {
     suggestionButtons[2].dataset.prompt =
       currentLanguage() === "zh" ? "针对当前页面给出建议" : "Give suggestions for the current page";
   }
+}
+
+function syncAgentModeButton() {
+  agentModeButton.dataset.active = agentModeEnabled ? "true" : "false";
+}
+
+function renderAgentState(agent) {
+  const agentStatus = agent?.status || "";
+  syncAgentModeButton();
+
+  const pendingApproval = agent?.pendingApproval;
+  agentApprovalCard.classList.toggle("is-hidden", !pendingApproval);
+  if (pendingApproval) {
+    agentApprovalPreview.textContent = String(pendingApproval.previewText || pendingApproval.toolName || "");
+  }
+  agentCancelButton.classList.toggle("is-hidden", !(agentStatus === "planning" || agentStatus === "executing" || agentStatus === "awaiting_approval"));
 }
 
 function normalizeVisualValue(value) {
@@ -931,11 +1300,12 @@ function bindModels(models, selectedModel) {
   const safeModels =
     Array.isArray(models) && models.length
       ? models
-      : [{ id: "gpt-5.4-mini", label: "gpt-5.4-mini" }];
+      : [{ id: "gpt-5.4-mini", label: "gpt-5.4-mini", displayLabel: "gpt-5.4-mini" }];
   for (const model of safeModels) {
     const option = document.createElement("option");
     option.value = model.id;
     option.textContent = model.label || model.id;
+    option.dataset.displayLabel = model.displayLabel || model.label || model.id;
     modelSelect.appendChild(option);
   }
   modelSelect.value = selectedModel;
@@ -947,7 +1317,8 @@ function bindModels(models, selectedModel) {
 
 function syncSelectedModelDisplay() {
   const selectedOption = modelSelect.options[modelSelect.selectedIndex];
-  modelDisplay.textContent = selectedOption?.textContent || "选择模型";
+  modelDisplay.textContent =
+    selectedOption?.dataset.displayLabel || selectedOption?.textContent || "选择模型";
 }
 
 function renderMessages(messages) {
@@ -969,13 +1340,136 @@ function renderMessages(messages) {
         : role === "assistant"
           ? "message-markdown"
           : "message-plain";
-    const content =
-      role === "assistant"
-        ? renderMarkdown(item.text || "")
-        : renderPlainText(item.text || "");
+    const content = renderConversationMessageContent(item, role);
     entry.innerHTML = `<div class="${cssClass}">${content}</div>`;
+    if (role === "assistant") {
+      attachCopyButton(entry, item.text || "");
+    }
     conversationList.appendChild(entry);
   }
+}
+
+function renderConversationMessageContent(item, role) {
+  const attachments = Array.isArray(item?.attachments) ? item.attachments : [];
+  const attachmentMarkup = attachments.length ? renderMessageAttachments(attachments) : "";
+  const textMarkup =
+    role === "assistant"
+      ? `<div class="message-copy">${renderMarkdown(item.text || "")}</div>`
+      : `<div class="message-copy">${renderPlainText(item.text || "")}</div>`;
+  return `${attachmentMarkup}${textMarkup}`;
+}
+
+function renderMessageAttachments(attachments) {
+  const images = attachments
+    .filter((attachment) => attachment?.kind === "image" && attachment?.dataURL)
+    .map((attachment) => `
+      <img
+        class="message-attachment-image"
+        src="${escapeAttribute(attachment.dataURL)}"
+        alt="${escapeAttribute(attachment.filename || "attachment")}"
+      />
+    `)
+    .join("");
+  return images ? `<div class="message-attachments">${images}</div>` : "";
+}
+
+function attachCopyButton(entry, text) {
+  const messageNode = entry.querySelector(".message-markdown, .message-plain");
+  if (!messageNode) {
+    return;
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  actions.innerHTML = `
+    <button
+      class="message-copy-button"
+      type="button"
+      data-copy-message="true"
+      aria-label="${escapeAttribute(t("aria_copy_message"))}"
+      title="${escapeAttribute(t("aria_copy_message"))}"
+    >
+      ${COPY_ICON}
+    </button>
+  `;
+
+  const copyButton = actions.querySelector("[data-copy-message='true']");
+  if (copyButton) {
+    copyButton._copyText = text;
+  }
+
+  messageNode.appendChild(actions);
+}
+
+async function copyTextToClipboard(text) {
+  if (webkit?.messageHandlers?.controller) {
+    try {
+      webkit.messageHandlers.controller.postMessage({
+        command: "copy-message",
+        text,
+      });
+      return true;
+    } catch (_) {}
+  }
+
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {}
+  }
+
+  const fallback = document.createElement("textarea");
+  fallback.value = text;
+  fallback.setAttribute("readonly", "true");
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  fallback.style.pointerEvents = "none";
+  fallback.style.inset = "0";
+  document.body.appendChild(fallback);
+  fallback.focus();
+  fallback.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy") === true;
+  } catch (_) {
+    copied = false;
+  }
+
+  fallback.remove();
+  return copied;
+}
+
+function showCopyFeedback(button) {
+  if (copyFeedbackButton && copyFeedbackButton !== button) {
+    copyFeedbackButton.dataset.copied = "false";
+    copyFeedbackButton.setAttribute("aria-label", t("aria_copy_message"));
+    copyFeedbackButton.setAttribute("title", t("aria_copy_message"));
+    copyFeedbackButton.innerHTML = COPY_ICON;
+  }
+
+  if (copyFeedbackTimer) {
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+
+  const label = t("copied");
+  copyFeedbackButton = button;
+  button.dataset.copied = "true";
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+  button.innerHTML = COPIED_ICON;
+
+  copyFeedbackTimer = setTimeout(() => {
+    button.dataset.copied = "false";
+    button.setAttribute("aria-label", t("aria_copy_message"));
+    button.setAttribute("title", t("aria_copy_message"));
+    button.innerHTML = COPY_ICON;
+    if (copyFeedbackButton === button) {
+      copyFeedbackButton = null;
+    }
+  }, 1600);
 }
 
 historyThreadList.addEventListener("click", (event) => {
@@ -1028,16 +1522,26 @@ function renderHistoryThreadList(threads, activeThreadId) {
       thread.sourcePageTitle ||
       thread.sourcePageURL ||
       t("unknown_page");
-    item.innerHTML = `
-      <div class="history-thread-row">
-        <button
+    const isEditing = String(thread.id || "") === editingHistoryThreadId;
+    const titleMarkup = isEditing
+      ? `<input
+          type="text"
+          class="history-thread-title-editor"
+          data-history-title-editor="true"
+          data-thread-id="${escapeHtml(thread.id || "")}"
+          value="${escapeAttribute(thread.title || "")}"
+        />`
+      : `<button
           type="button"
           class="history-thread-open"
           data-history-open="true"
           data-thread-id="${escapeHtml(thread.id || "")}"
         >
           <div class="history-thread-title">${escapeHtml(thread.title || "新对话")}</div>
-        </button>
+        </button>`;
+    item.innerHTML = `
+      <div class="history-thread-row">
+        ${titleMarkup}
         <button
           type="button"
           class="history-thread-menu-button"
@@ -1060,6 +1564,16 @@ function renderHistoryThreadList(threads, activeThreadId) {
       </button>
     `;
     historyThreadList.appendChild(item);
+
+    if (isEditing) {
+      queueMicrotask(() => {
+        const input = historyThreadList.querySelector(`[data-history-title-editor="true"][data-thread-id="${CSS.escape(String(thread.id || ""))}"]`);
+        if (input) {
+          input.focus();
+          input.select();
+        }
+      });
+    }
   }
 }
 
@@ -1089,6 +1603,7 @@ function closeHistoryActionMenu() {
 }
 
 historyActionMenu.addEventListener("click", (event) => {
+  event.stopPropagation();
   const actionButton = event.target.closest?.("[data-history-action]");
   if (!actionButton || !openHistoryMenuThreadId) {
     return;
@@ -1096,10 +1611,8 @@ historyActionMenu.addEventListener("click", (event) => {
 
   const action = actionButton.dataset.historyAction || "";
   if (action === "rename") {
-    webkit.messageHandlers.controller.postMessage({
-      command: "prompt-rename-thread",
-      threadId: openHistoryMenuThreadId,
-    });
+    editingHistoryThreadId = openHistoryMenuThreadId;
+    renderHistoryThreadList(currentHistoryThreads, currentThreadId);
   } else if (action === "pin") {
     webkit.messageHandlers.controller.postMessage({
       command: "toggle-pin-thread",
@@ -1108,13 +1621,73 @@ historyActionMenu.addEventListener("click", (event) => {
     });
   } else if (action === "delete") {
     webkit.messageHandlers.controller.postMessage({
-      command: "confirm-delete-thread",
+      command: "delete-thread",
       threadId: openHistoryMenuThreadId,
     });
   }
 
   closeHistoryActionMenu();
 });
+
+historyThreadList.addEventListener("keydown", (event) => {
+  const input = event.target.closest?.("[data-history-title-editor='true']");
+  if (!input) {
+    return;
+  }
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    commitInlineThreadRename(input);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    cancelInlineThreadRename();
+  }
+});
+
+historyThreadList.addEventListener("focusout", (event) => {
+  const input = event.target.closest?.("[data-history-title-editor='true']");
+  if (!input) {
+    return;
+  }
+
+  queueMicrotask(() => {
+    if (document.activeElement === input) {
+      return;
+    }
+    commitInlineThreadRename(input);
+  });
+});
+
+historyThreadList.addEventListener("click", (event) => {
+  const input = event.target.closest?.("[data-history-title-editor='true']");
+  if (input) {
+    event.stopPropagation();
+  }
+});
+
+function commitInlineThreadRename(input) {
+  const threadId = input.dataset.threadId || "";
+  const title = String(input.value || "").trim();
+  editingHistoryThreadId = "";
+  if (!threadId) {
+    renderHistoryThreadList(currentHistoryThreads, currentThreadId);
+    return;
+  }
+  if (!title) {
+    renderHistoryThreadList(currentHistoryThreads, currentThreadId);
+    return;
+  }
+  webkit.messageHandlers.controller.postMessage({
+    command: "rename-thread",
+    threadId,
+    title,
+  });
+}
+
+function cancelInlineThreadRename() {
+  editingHistoryThreadId = "";
+  renderHistoryThreadList(currentHistoryThreads, currentThreadId);
+}
 
 function formatThreadTimestamp(value) {
   const numeric = Number(value);
@@ -1139,6 +1712,14 @@ function formatThreadTimestamp(value) {
 
 function renderPlainText(value) {
   return escapeHtml(value).replaceAll("\n", "<br>");
+}
+
+function escapeAttribute(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function renderMarkdown(value) {

@@ -202,3 +202,48 @@ enum PanelStateWriter {
         saveSelectionIntent(url: url, selection: selection)
     }
 }
+
+enum NativeAgentBridgeStore {
+    private static let requestURL = NativeSharedContainer.baseURL().appendingPathComponent("agent-bridge-request.json")
+    private static let responseURL = NativeSharedContainer.baseURL().appendingPathComponent("agent-bridge-response.json")
+
+    static func claimPendingRequest() -> [String: Any]? {
+        guard var payload = readJSON(from: requestURL) else {
+            return nil
+        }
+        guard String(describing: payload["status"] ?? "") == "pending" else {
+            return nil
+        }
+        payload["status"] = "claimed"
+        payload["claimedAt"] = Date().timeIntervalSince1970
+        try? writeJSON(payload, to: requestURL)
+        return payload
+    }
+
+    static func submitResult(requestId: String, result: [String: Any]) {
+        let payload: [String: Any] = [
+            "requestId": requestId,
+            "result": result,
+            "updatedAt": Date().timeIntervalSince1970,
+        ]
+        try? writeJSON(payload, to: responseURL)
+        try? FileManager.default.removeItem(at: requestURL)
+    }
+
+    private static func readJSON(from url: URL) -> [String: Any]? {
+        guard
+            let data = try? Data(contentsOf: url),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
+        }
+        return payload
+    }
+
+    private static func writeJSON(_ payload: [String: Any], to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+    }
+}

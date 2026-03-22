@@ -25,6 +25,10 @@ setInterval(() => {
   syncActiveTabSnapshot().catch(() => {});
 }, 1200);
 
+setInterval(() => {
+  pollAgentToolRequests().catch(() => {});
+}, 450);
+
 if (browser.tabs?.onUpdated) {
   browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (!tabId || (!changeInfo.url && changeInfo.status !== "complete")) {
@@ -539,6 +543,150 @@ async function askPage(tabIdFromSender, prompt, selectionFromPopup) {
         }
       : null
   );
+}
+
+async function pollAgentToolRequests() {
+  const response = await sendNativeControlRequest("agent_poll_request", {});
+  if (!response?.ok) {
+    return;
+  }
+  const request = response.payload?.request;
+  if (!request?.requestId || !request?.toolName) {
+    return;
+  }
+
+  const result = await executeAgentToolRequest(request);
+  await sendNativeControlRequest("agent_submit_result", {
+    requestId: request.requestId,
+    result,
+  });
+}
+
+async function executeAgentToolRequest(request) {
+  const toolName = String(request.toolName || "");
+  const args = request.arguments ?? {};
+  const tabId = await resolveTabId(null);
+  if (!tabId) {
+    return {
+      ok: false,
+      errorCode: "tab_not_found",
+      humanSummary: "未找到当前标签页。",
+    };
+  }
+
+  if (toolName === "get_page_context") {
+    const contextResult = await ensurePageContext(tabId);
+    if (!contextResult.ok) {
+      return {
+        ok: false,
+        errorCode: contextResult.error?.code ?? "page_context_failed",
+        humanSummary: contextResult.error?.message ?? "页面上下文读取失败。",
+      };
+    }
+    return {
+      ok: true,
+      humanSummary: "已读取当前页面上下文。",
+      data: contextResult.payload?.context ?? {},
+    };
+  }
+
+  if (toolName === "list_interactive_targets") {
+    const contextResult = await ensurePageContext(tabId);
+    if (!contextResult.ok) {
+      return {
+        ok: false,
+        errorCode: contextResult.error?.code ?? "list_targets_failed",
+        humanSummary: contextResult.error?.message ?? "无法列出可交互目标。",
+      };
+    }
+    return {
+      ok: true,
+      humanSummary: "已列出当前页面可交互目标。",
+      data: {
+        targets: contextResult.payload?.context?.interactiveTargets ?? [],
+      },
+    };
+  }
+
+  if (toolName === "extract_structured_data") {
+    const contextResult = await ensurePageContext(tabId);
+    const context = contextResult.payload?.context ?? {};
+    return {
+      ok: true,
+      humanSummary: "已提取当前页面结构化摘要。",
+      data: {
+        title: context.title ?? "",
+        url: context.url ?? "",
+        site: context.site ?? "",
+        pageKind: context.metadata?.pageKind ?? "",
+        structureSummary: context.structureSummary ?? "",
+        interactiveSummary: context.interactiveSummary ?? "",
+        selection: context.selection ?? "",
+      },
+    };
+  }
+
+  if (toolName === "highlight_target" || toolName === "focus_target" || toolName === "scroll_to_target") {
+    const actionMap = {
+      highlight_target: "highlight",
+      focus_target: "focus",
+      scroll_to_target: "scroll",
+    };
+    const action = actionMap[toolName];
+    const targetResult = await performTargetAction(tabId, action, args.targetId);
+    if (!targetResult.ok) {
+      return {
+        ok: false,
+        errorCode: targetResult.error?.code ?? "target_action_failed",
+        humanSummary: targetResult.error?.message ?? "目标操作失败。",
+      };
+    }
+    return {
+      ok: true,
+      humanSummary: `已执行 ${toolName}。`,
+      data: targetResult.payload ?? {},
+    };
+  }
+
+  const messageTypeMap = {
+    click_target: "content:click-target",
+    read_target: "content:read-target",
+    fill_target: "content:fill-target",
+    navigate_page: "content:navigate-page",
+  };
+  const messageType = messageTypeMap[toolName];
+  if (!messageType) {
+    return {
+      ok: false,
+      errorCode: "unsupported_agent_tool",
+      humanSummary: `不支持的 agent 工具：${toolName}`,
+    };
+  }
+
+  try {
+    const response = await browser.tabs.sendMessage(tabId, {
+      type: messageType,
+      payload: args,
+    });
+    if (!response?.ok) {
+      return {
+        ok: false,
+        errorCode: response?.error?.code ?? "agent_tool_failed",
+        humanSummary: response?.error?.message ?? "页面动作执行失败。",
+      };
+    }
+    return {
+      ok: true,
+      humanSummary: response.payload?.answer ?? `已执行 ${toolName}。`,
+      data: response.payload ?? {},
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorCode: "content_script_unreachable",
+      humanSummary: `无法执行页面动作：${error.message}`,
+    };
+  }
 }
 
 async function resolveTabId(tabIdFromSender) {

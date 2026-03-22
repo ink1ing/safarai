@@ -7,6 +7,7 @@
 
 import Cocoa
 import SafariServices
+import UniformTypeIdentifiers
 import WebKit
 
 let extensionBundleIdentifier = "ink.safarai.Extension"
@@ -17,7 +18,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private var panelRefreshTimer: Timer?
     private var responseTask: Task<Void, Never>?
+    private var agentTask: Task<Void, Never>?
     private var safariWindowFollower: SafariWindowFollower?
+    private var agentSessionState: [String: Any]?
+    private var agentApprovalContinuation: CheckedContinuation<Bool, Never>?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -125,8 +129,20 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             }
         case "save-selected-model":
             saveSelectedModel(body)
+        case "start-agent":
+            startAgent(body)
+        case "approve-agent-action":
+            resolveAgentApproval(true)
+        case "reject-agent-action":
+            resolveAgentApproval(false)
+        case "cancel-agent":
+            cancelAgent()
+        case "pick-attachments":
+            pickAttachments()
         case "send-question":
             sendQuestion(body)
+        case "copy-message":
+            copyMessage(body["text"] as? String)
         case "create-thread":
             createThread()
         case "load-thread":
@@ -137,10 +153,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             if let threadID = body["threadId"] as? String {
                 renameThread(threadID, title: body["title"] as? String)
             }
-        case "prompt-rename-thread":
-            if let threadID = body["threadId"] as? String {
-                promptRenameThread(threadID)
-            }
         case "toggle-pin-thread":
             if let threadID = body["threadId"] as? String {
                 togglePinnedThread(threadID, isPinned: body["isPinned"] as? Bool)
@@ -148,10 +160,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         case "delete-thread":
             if let threadID = body["threadId"] as? String {
                 deleteThread(threadID)
-            }
-        case "confirm-delete-thread":
-            if let threadID = body["threadId"] as? String {
-                confirmDeleteThread(threadID)
             }
         case "list-threads":
             pushPanelState()
@@ -242,6 +250,17 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         default:
             break
         }
+    }
+
+    private func copyMessage(_ rawText: String?) {
+        let text = (rawText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func startCodexLogin() {
@@ -428,23 +447,27 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let selectedFocus = (body["selectedFocus"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !prompt.isEmpty else {
+        let attachments = parseAttachments(body["attachments"])
+        let resolvedPrompt = prompt.isEmpty && !attachments.isEmpty
+            ? AppText.localized(en: "Analyze the attached images.", zh: "请分析我附带的图片内容。")
+            : prompt
+        guard !resolvedPrompt.isEmpty else {
             pushPanelState(status: AppText.localized(en: "Enter a question.", zh: "请输入问题。"))
             return
         }
 
         var snapshot = PanelStateStore.load()
             ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
-        if snapshot.currentThreadId == nil {
-            let thread = try? ChatHistoryStore.createThread(context: snapshot.context)
-            snapshot.currentThreadId = thread?.id
-        }
-        snapshot.messages.append(PanelConversationMessage(role: "user", kind: "question", text: prompt))
+        snapshot.messages.append(
+            PanelConversationMessage(
+                role: "user",
+                kind: "question",
+                text: prompt,
+                attachments: attachments.isEmpty ? nil : attachments
+            )
+        )
         snapshot.status = AppText.localized(en: "Answering", zh: "正在回答")
         snapshot.updatedAt = Date().timeIntervalSince1970
-        if let synced = try? ChatHistoryStore.syncSnapshot(snapshot) {
-            snapshot = synced
-        }
         try? PanelStateStore.save(snapshot)
 
         pushPanelState(status: AppText.localized(en: "Answering", zh: "正在回答"), snapshot: snapshot)
@@ -467,17 +490,19 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 let stream: AsyncThrowingStream<String, Error>
                 if activeProvider == .zed {
                     stream = ZedResponseService.shared.streamQuestion(
-                        prompt: prompt,
+                        prompt: resolvedPrompt,
                         context: contextSnapshot,
                         history: historySnapshot,
-                        selectedFocus: selectedFocus
+                        selectedFocus: selectedFocus,
+                        attachments: attachments
                     )
                 } else {
                     stream = CodexResponseService.shared.streamQuestion(
-                        prompt: prompt,
+                        prompt: resolvedPrompt,
                         context: contextSnapshot,
                         history: historySnapshot,
-                        selectedFocus: selectedFocus
+                        selectedFocus: selectedFocus,
+                        attachments: attachments
                     )
                 }
 
@@ -520,6 +545,234 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private func stopCurrentResponse() {
         guard let responseTask else { return }
         responseTask.cancel()
+    }
+
+    private func startAgent(_ body: [String: Any]) {
+        guard agentTask == nil else {
+            pushPanelState(status: AppText.localized(en: "Agent is already running.", zh: "Agent 正在运行。"))
+            return
+        }
+
+        let prompt = (body["prompt"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let attachments = parseAttachments(body["attachments"])
+        let resolvedPrompt = prompt.isEmpty && !attachments.isEmpty
+            ? AppText.localized(en: "Analyze the attached images and act on the current page.", zh: "请分析我附带的图片，并结合当前页面执行任务。")
+            : prompt
+        guard !resolvedPrompt.isEmpty else {
+            pushPanelState(status: AppText.localized(en: "Enter an agent goal.", zh: "请输入 agent 目标。"))
+            return
+        }
+
+        var snapshot = PanelStateStore.load()
+            ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        snapshot.messages.append(
+            PanelConversationMessage(
+                role: "user",
+                kind: "agent_goal",
+                text: prompt,
+                attachments: attachments.isEmpty ? nil : attachments
+            )
+        )
+        snapshot.status = AppText.localized(en: "Agent planning", zh: "Agent 正在规划")
+        snapshot.updatedAt = Date().timeIntervalSince1970
+        try? PanelStateStore.save(snapshot)
+
+        agentSessionState = buildAgentState(
+            status: "planning",
+            responseId: nil,
+            steps: [
+                buildAgentStep(
+                    kind: "plan",
+                    title: AppText.localized(en: "Planning", zh: "正在规划"),
+                    detail: resolvedPrompt,
+                    status: "running"
+                )
+            ],
+            pendingApproval: nil,
+            finalAnswer: nil,
+            error: nil
+        )
+        pushPanelState(status: AppText.localized(en: "Agent planning", zh: "Agent 正在规划"), snapshot: snapshot)
+
+        agentTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runAgentLoop(prompt: resolvedPrompt, attachments: attachments, baseSnapshot: snapshot)
+        }
+    }
+
+    private func cancelAgent() {
+        agentTask?.cancel()
+        agentTask = nil
+        resolveAgentApproval(false)
+        agentSessionState = buildAgentState(
+            status: "canceled",
+            responseId: agentSessionState?["responseId"] as? String,
+            steps: (agentSessionState?["steps"] as? [[String: Any]]) ?? [],
+            pendingApproval: nil,
+            finalAnswer: nil,
+            error: nil
+        )
+        pushPanelState(status: AppText.localized(en: "Agent canceled.", zh: "Agent 已取消。"))
+    }
+
+    private func resolveAgentApproval(_ approved: Bool) {
+        let continuation = agentApprovalContinuation
+        agentApprovalContinuation = nil
+        continuation?.resume(returning: approved)
+    }
+
+    private func runAgentLoop(
+        prompt: String,
+        attachments: [PanelAttachment],
+        baseSnapshot: PanelStateSnapshot
+    ) async {
+        do {
+            var currentInput = [buildAgentUserInput(prompt: prompt, attachments: attachments)]
+            var finalAnswer = ""
+
+            for _ in 0..<12 {
+                try Task.checkCancellation()
+
+                let response = try await CodexResponseService.shared.createAgentResponse(
+                    input: currentInput,
+                    tools: buildAgentToolDefinitions()
+                )
+                let responseId = response["id"] as? String
+
+                let parsed = parseAgentResponse(response)
+                await MainActor.run {
+                    self.agentSessionState = self.buildAgentState(
+                        status: parsed.functionCalls.isEmpty ? "executing" : "awaiting_approval",
+                        responseId: responseId,
+                        steps: parsed.steps,
+                        pendingApproval: nil,
+                        finalAnswer: nil,
+                        error: nil
+                    )
+                    self.pushPanelState(status: AppText.localized(en: "Agent executing", zh: "Agent 正在执行"), snapshot: baseSnapshot)
+                }
+
+                if !parsed.text.isEmpty, parsed.functionCalls.isEmpty {
+                    finalAnswer = parsed.text
+                    break
+                }
+
+                guard let functionCall = parsed.functionCalls.first else {
+                    break
+                }
+
+                let toolArgs = functionCall["arguments"] as? [String: Any] ?? [:]
+                let toolName = functionCall["name"] as? String ?? ""
+                let callId = functionCall["callId"] as? String ?? ""
+                let riskLevel = riskLevelForTool(toolName)
+
+                var toolResult: [String: Any]
+                if requiresApproval(riskLevel: riskLevel) {
+                    let approvalPayload = buildApprovalPayload(
+                        toolName: toolName,
+                        arguments: toolArgs,
+                        riskLevel: riskLevel
+                    )
+                    await MainActor.run {
+                        self.agentSessionState = self.buildAgentState(
+                            status: "awaiting_approval",
+                            responseId: responseId,
+                            steps: parsed.steps,
+                            pendingApproval: approvalPayload,
+                            finalAnswer: nil,
+                            error: nil
+                        )
+                        self.pushPanelState(status: AppText.localized(en: "Awaiting approval", zh: "等待确认"), snapshot: baseSnapshot)
+                    }
+                    let approved = await waitForAgentApproval()
+                    if !approved {
+                        toolResult = [
+                            "ok": false,
+                            "errorCode": "user_denied",
+                            "humanSummary": AppText.localized(en: "User denied the action.", zh: "用户拒绝了该动作。")
+                        ]
+                    } else {
+                        toolResult = try await executeAgentTool(toolName: toolName, arguments: toolArgs)
+                    }
+                } else {
+                    toolResult = try await executeAgentTool(toolName: toolName, arguments: toolArgs)
+                }
+
+                currentInput = [[
+                    "type": "function_call_output",
+                    "call_id": callId,
+                    "output": stringifyJSON(toolResult),
+                ]]
+            }
+
+            await MainActor.run {
+                self.finishAgentRun(baseSnapshot: baseSnapshot, finalAnswer: finalAnswer)
+            }
+        } catch is CancellationError {
+            await MainActor.run {
+                self.agentTask = nil
+            }
+        } catch {
+            await MainActor.run {
+                self.agentTask = nil
+                self.agentSessionState = self.buildAgentState(
+                    status: "failed",
+                    responseId: self.agentSessionState?["responseId"] as? String,
+                    steps: (self.agentSessionState?["steps"] as? [[String: Any]]) ?? [],
+                    pendingApproval: nil,
+                    finalAnswer: nil,
+                    error: error.localizedDescription
+                )
+                self.pushError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func waitForAgentApproval() async -> Bool {
+        await withCheckedContinuation { continuation in
+            agentApprovalContinuation = continuation
+        }
+    }
+
+    private func executeAgentTool(toolName: String, arguments: [String: Any]) async throws -> [String: Any] {
+        let requestId = try AgentBridgeStore.enqueue(toolName: toolName, arguments: arguments)
+        let start = Date()
+        while Date().timeIntervalSince(start) < 20 {
+            if let response = AgentBridgeStore.loadResponse(requestId: requestId),
+               let result = response["result"] as? [String: Any] {
+                AgentBridgeStore.clearResponse()
+                return result
+            }
+            try await Task.sleep(nanoseconds: 150_000_000)
+        }
+
+        return [
+            "ok": false,
+            "errorCode": "tool_timeout",
+            "humanSummary": AppText.localized(en: "Tool execution timed out.", zh: "工具执行超时。")
+        ]
+    }
+
+    private func finishAgentRun(baseSnapshot: PanelStateSnapshot, finalAnswer: String) {
+        agentTask = nil
+        var snapshot = PanelStateStore.load() ?? baseSnapshot
+        if !finalAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            snapshot.messages.append(PanelConversationMessage(role: "assistant", kind: "agent_answer", text: finalAnswer))
+            if let synced = try? ChatHistoryStore.syncSnapshot(snapshot) {
+                snapshot = synced
+            }
+            try? PanelStateStore.save(snapshot)
+        }
+        agentSessionState = buildAgentState(
+            status: "done",
+            responseId: agentSessionState?["responseId"] as? String,
+            steps: (agentSessionState?["steps"] as? [[String: Any]]) ?? [],
+            pendingApproval: nil,
+            finalAnswer: finalAnswer,
+            error: nil
+        )
+        pushPanelState(status: AppText.localized(en: "Agent finished.", zh: "Agent 已完成。"), snapshot: snapshot)
     }
 
     private func refreshPanelContext() {
@@ -634,6 +887,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
         let payload: [String: Any] = [
             "settings": settingsPayload,
+            "agent": agentSessionState ?? NSNull(),
             "currentThreadId": jsonValue(snapshot?.currentThreadId),
             "historyThreads": historyThreads.map {
                 [
@@ -658,7 +912,24 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 "metadata": snapshot?.context?.metadata ?? [:],
                 "updatedAt": jsonValue(snapshot?.updatedAt)
             ],
-            "messages": snapshot?.messages.map { ["role": $0.role, "kind": $0.kind, "text": $0.text] } ?? [],
+            "messages": snapshot?.messages.map {
+                [
+                    "role": $0.role,
+                    "kind": $0.kind,
+                    "text": $0.text,
+                    "attachments": $0.attachments?.map {
+                        [
+                            "id": $0.id,
+                            "kind": $0.kind,
+                            "filename": $0.filename,
+                            "mimeType": $0.mimeType,
+                            "dataURL": $0.dataURL,
+                            "width": jsonValue($0.width),
+                            "height": jsonValue($0.height)
+                        ]
+                    } ?? []
+                ]
+            } ?? [],
             "status": jsonValue(status ?? snapshot?.status),
             "updatedAt": jsonValue(snapshot?.updatedAt),
             "isStreaming": responseTask != nil
@@ -683,7 +954,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
         next.status = status
         next.updatedAt = Date().timeIntervalSince1970
-        if let synced = try? ChatHistoryStore.syncSnapshot(next) {
+        let shouldPersistHistory = next.currentThreadId != nil || !(assistantText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if shouldPersistHistory, let synced = try? ChatHistoryStore.syncSnapshot(next) {
             next = synced
         }
         try? PanelStateStore.save(next)
@@ -698,7 +970,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         snapshot.messages.append(PanelConversationMessage(role: "error", kind: "error", text: message))
         snapshot.status = nil
         snapshot.updatedAt = Date().timeIntervalSince1970
-        if let synced = try? ChatHistoryStore.syncSnapshot(snapshot) {
+        if snapshot.currentThreadId != nil, let synced = try? ChatHistoryStore.syncSnapshot(snapshot) {
             snapshot = synced
         }
         try? PanelStateStore.save(snapshot)
@@ -710,22 +982,17 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             stopCurrentResponse()
         }
 
-        do {
-            let current = PanelStateStore.load()
-                ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
-            let thread = try ChatHistoryStore.createThread(context: current.context)
-            let snapshot = PanelStateSnapshot(
-                context: current.context,
-                currentThreadId: thread.id,
-                messages: [],
-                status: nil,
-                updatedAt: Date().timeIntervalSince1970
-            )
-            try PanelStateStore.save(snapshot)
-            pushPanelState(status: AppText.localized(en: "New chat created.", zh: "已创建新对话。"), snapshot: snapshot)
-        } catch {
-            pushError(error.localizedDescription)
-        }
+        let current = PanelStateStore.load()
+            ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        let snapshot = PanelStateSnapshot(
+            context: current.context,
+            currentThreadId: nil,
+            messages: [],
+            status: nil,
+            updatedAt: Date().timeIntervalSince1970
+        )
+        try? PanelStateStore.save(snapshot)
+        pushPanelState(status: AppText.localized(en: "New chat created.", zh: "已创建新对话。"), snapshot: snapshot)
     }
 
     private func loadThread(_ threadID: String) {
@@ -757,27 +1024,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
     }
 
-    private func promptRenameThread(_ threadID: String) {
-        let alert = NSAlert()
-        alert.messageText = AppText.localized(en: "Rename chat", zh: "重命名聊天记录")
-        alert.informativeText = AppText.localized(en: "Enter a new title for this chat.", zh: "输入新的聊天记录标题。")
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: AppText.localized(en: "Save", zh: "保存"))
-        alert.addButton(withTitle: AppText.localized(en: "Cancel", zh: "取消"))
-
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        if let record = ChatHistoryStore.loadThread(id: threadID) {
-            input.stringValue = record.title
-        }
-        alert.accessoryView = input
-
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else {
-            return
-        }
-        renameThread(threadID, title: input.stringValue)
-    }
-
     private func togglePinnedThread(_ threadID: String, isPinned: Bool?) {
         do {
             try ChatHistoryStore.setPinned(id: threadID, isPinned: isPinned ?? false)
@@ -803,21 +1049,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         } catch {
             pushError(error.localizedDescription)
         }
-    }
-
-    private func confirmDeleteThread(_ threadID: String) {
-        let alert = NSAlert()
-        alert.messageText = AppText.localized(en: "Delete chat", zh: "删除聊天记录")
-        alert.informativeText = AppText.localized(en: "This action cannot be undone.", zh: "删除后不可恢复。")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: AppText.localized(en: "Delete", zh: "删除"))
-        alert.addButton(withTitle: AppText.localized(en: "Cancel", zh: "取消"))
-
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else {
-            return
-        }
-        deleteThread(threadID)
     }
 
     private func changeHistoryStorageLocation() {
@@ -893,6 +1124,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private func ensureHistorySnapshot(_ snapshot: PanelStateSnapshot?) -> PanelStateSnapshot? {
         guard var snapshot else {
             return nil
+        }
+
+        guard snapshot.currentThreadId != nil else {
+            return snapshot
         }
 
         if let synced = try? ChatHistoryStore.syncSnapshot(snapshot), synced.currentThreadId != snapshot.currentThreadId {
@@ -1042,7 +1277,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             models += zedConfig.model.available.map { model in
                 [
                     "id": modelOptionID(provider: .zed, modelID: model.id),
-                    "label": showSource ? "\(model.label) from zed" : model.label
+                    "label": showSource ? "\(model.label) from zed" : model.label,
+                    "displayLabel": model.label
                 ]
             }
         }
@@ -1051,7 +1287,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             models += codexConfig.model.available.map { model in
                 [
                     "id": modelOptionID(provider: .codex, modelID: model.id),
-                    "label": showSource ? "\(model.label) from codex" : model.label
+                    "label": showSource ? "\(model.label) from codex" : model.label,
+                    "displayLabel": model.label
                 ]
             }
         }
@@ -1059,7 +1296,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         if models.isEmpty {
             return [[
                 "id": modelOptionID(provider: .codex, modelID: "gpt-5.4-mini"),
-                "label": "gpt-5.4-mini"
+                "label": "gpt-5.4-mini",
+                "displayLabel": "gpt-5.4-mini"
             ]]
         }
 
@@ -1171,6 +1409,321 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "backgroundSelectionMessage": jsonValue(snapshotDebug?["backgroundSelectionMessage"]),
             "backgroundSource": jsonValue(snapshotDebug?["backgroundSource"]),
         ]
+    }
+
+    private func parseAttachments(_ rawValue: Any?) -> [PanelAttachment] {
+        guard let rawValue else {
+            return []
+        }
+        guard JSONSerialization.isValidJSONObject(rawValue),
+              let data = try? JSONSerialization.data(withJSONObject: rawValue),
+              let attachments = try? JSONDecoder().decode([PanelAttachment].self, from: data) else {
+            return []
+        }
+        return attachments.filter { attachment in
+            attachment.kind == "image"
+                && attachment.mimeType.hasPrefix("image/")
+                && attachment.dataURL.hasPrefix("data:\(attachment.mimeType);base64,")
+        }
+    }
+
+    private func buildAgentUserInput(prompt: String, attachments: [PanelAttachment]) -> [String: Any] {
+        var content: [[String: Any]] = [["type": "input_text", "text": prompt]]
+        content += attachments.compactMap { attachment in
+            guard attachment.kind == "image", attachment.mimeType.hasPrefix("image/") else {
+                return nil
+            }
+            return [
+                "type": "input_image",
+                "image_url": attachment.dataURL
+            ]
+        }
+
+        return [
+            "type": "message",
+            "role": "user",
+            "content": content
+        ]
+    }
+
+    private func buildAgentToolDefinitions() -> [[String: Any]] {
+        let noArgSchema: [String: Any] = [
+            "type": "object",
+            "properties": [:],
+            "additionalProperties": false
+        ]
+        let targetSchema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "targetId": ["type": "string", "description": "Interactive target id from list_interactive_targets"]
+            ],
+            "required": ["targetId"],
+            "additionalProperties": false
+        ]
+        return [
+            buildAgentTool(name: "get_page_context", description: "Get the latest page context for the current Safari page.", parameters: noArgSchema),
+            buildAgentTool(name: "list_interactive_targets", description: "List interactive targets on the current Safari page.", parameters: noArgSchema),
+            buildAgentTool(name: "highlight_target", description: "Highlight a target without causing side effects.", parameters: targetSchema),
+            buildAgentTool(name: "focus_target", description: "Focus a target element.", parameters: targetSchema),
+            buildAgentTool(name: "scroll_to_target", description: "Scroll the page so the target is visible.", parameters: targetSchema),
+            buildAgentTool(name: "click_target", description: "Click a target element.", parameters: targetSchema),
+            buildAgentTool(name: "read_target", description: "Read the visible text for a target element.", parameters: targetSchema),
+            buildAgentTool(
+                name: "fill_target",
+                description: "Fill text into a writable target without submitting.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "targetId": ["type": "string"],
+                        "text": ["type": "string"]
+                    ],
+                    "required": ["targetId", "text"],
+                    "additionalProperties": false
+                ]
+            ),
+            buildAgentTool(
+                name: "navigate_page",
+                description: "Navigate the current page to a new URL.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "url": ["type": "string"]
+                    ],
+                    "required": ["url"],
+                    "additionalProperties": false
+                ]
+            ),
+            buildAgentTool(name: "extract_structured_data", description: "Return structured data from the current page context.", parameters: noArgSchema)
+        ]
+    }
+
+    private func buildAgentTool(name: String, description: String, parameters: [String: Any]) -> [String: Any] {
+        [
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        ]
+    }
+
+    private func parseAgentResponse(_ response: [String: Any]) -> (text: String, functionCalls: [[String: Any]], steps: [[String: Any]]) {
+        let output = response["output"] as? [[String: Any]] ?? []
+        var textParts: [String] = []
+        var calls: [[String: Any]] = []
+        var steps: [[String: Any]] = []
+
+        for item in output {
+            let type = item["type"] as? String ?? ""
+            if type == "message",
+               let content = item["content"] as? [[String: Any]] {
+                let texts = content.compactMap { block -> String? in
+                    let blockType = block["type"] as? String ?? ""
+                    if (blockType == "output_text" || blockType == "text"), let text = block["text"] as? String {
+                        return text
+                    }
+                    return nil
+                }
+                if !texts.isEmpty {
+                    let joined = texts.joined(separator: "\n")
+                    textParts.append(joined)
+                    steps.append(buildAgentStep(kind: "answer", title: AppText.localized(en: "Draft answer", zh: "草拟回答"), detail: joined, status: "done"))
+                }
+            } else if type == "function_call" {
+                let argumentsText = item["arguments"] as? String ?? "{}"
+                let callArguments = parseJSONStringDictionary(argumentsText)
+                let name = item["name"] as? String ?? ""
+                let callId = item["call_id"] as? String ?? ""
+                calls.append([
+                    "name": name,
+                    "callId": callId,
+                    "arguments": callArguments
+                ])
+                steps.append(buildAgentStep(kind: "tool_call", title: name, detail: argumentsText, status: "pending"))
+            } else if type == "computer_call" {
+                steps.append(buildAgentStep(kind: "computer_call", title: "computer_call", detail: "stub", status: "pending"))
+            }
+        }
+
+        if textParts.isEmpty, let outputText = response["output_text"] as? String, !outputText.isEmpty {
+            textParts.append(outputText)
+        }
+
+        return (textParts.joined(separator: "\n\n"), calls, steps)
+    }
+
+    private func parseJSONStringDictionary(_ value: String) -> [String: Any] {
+        guard let data = value.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return json
+    }
+
+    private func buildAgentState(
+        status: String,
+        responseId: String?,
+        steps: [[String: Any]],
+        pendingApproval: [String: Any]?,
+        finalAnswer: String?,
+        error: String?
+    ) -> [String: Any] {
+        [
+            "id": agentSessionState?["id"] as? String ?? UUID().uuidString.lowercased(),
+            "model": "gpt-5.4",
+            "mode": "safari_tools",
+            "responseId": jsonValue(responseId),
+            "status": status,
+            "steps": steps,
+            "pendingApproval": jsonValue(pendingApproval),
+            "finalAnswer": jsonValue(finalAnswer),
+            "error": jsonValue(error),
+        ]
+    }
+
+    private func buildAgentStep(kind: String, title: String, detail: String, status: String) -> [String: Any] {
+        [
+            "id": UUID().uuidString.lowercased(),
+            "kind": kind,
+            "title": title,
+            "detail": detail,
+            "status": status,
+            "startedAt": Date().timeIntervalSince1970,
+            "completedAt": status == "done" ? Date().timeIntervalSince1970 : NSNull(),
+            "toolCallId": NSNull(),
+        ]
+    }
+
+    private func buildApprovalPayload(toolName: String, arguments: [String: Any], riskLevel: String) -> [String: Any] {
+        [
+            "toolName": toolName,
+            "targetId": jsonValue(arguments["targetId"]),
+            "targetLabel": jsonValue(arguments["targetId"]),
+            "proposedArgs": arguments,
+            "riskLevel": riskLevel,
+            "previewText": approvalPreviewText(toolName: toolName, arguments: arguments),
+        ]
+    }
+
+    private func approvalPreviewText(toolName: String, arguments: [String: Any]) -> String {
+        switch toolName {
+        case "navigate_page":
+            return String(describing: arguments["url"] ?? "")
+        case "fill_target":
+            return String(describing: arguments["text"] ?? "")
+        default:
+            return String(describing: arguments["targetId"] ?? toolName)
+        }
+    }
+
+    private func requiresApproval(riskLevel: String) -> Bool {
+        riskLevel != "read_only"
+    }
+
+    private func riskLevelForTool(_ toolName: String) -> String {
+        switch toolName {
+        case "focus_target":
+            return "focus"
+        case "click_target":
+            return "click"
+        case "fill_target":
+            return "write"
+        case "navigate_page":
+            return "navigate"
+        default:
+            return "read_only"
+        }
+    }
+
+    private func stringifyJSON(_ value: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return text
+    }
+
+    private func pickAttachments() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP, .tiff, .bmp, .heic]
+        panel.prompt = AppText.localized(en: "Choose", zh: "选择")
+        panel.message = AppText.localized(en: "Choose images to attach", zh: "选择要附带的图片")
+
+        guard panel.runModal() == .OK else {
+            return
+        }
+
+        let attachments = panel.urls.compactMap { buildAttachment(from: $0) }
+        guard !attachments.isEmpty else {
+            pushPanelState(status: AppText.localized(en: "No valid images were selected.", zh: "没有选择可用图片。"))
+            return
+        }
+
+        let payload = attachments.map { attachment in
+            [
+                "id": attachment.id,
+                "kind": attachment.kind,
+                "filename": attachment.filename,
+                "mimeType": attachment.mimeType,
+                "dataURL": attachment.dataURL,
+                "width": jsonValue(attachment.width),
+                "height": jsonValue(attachment.height)
+            ]
+        }
+        evaluate(function: "appendPickedAttachments", payload: ["attachments": payload])
+    }
+
+    private func buildAttachment(from url: URL) -> PanelAttachment? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            return nil
+        }
+
+        let mimeType = mimeTypeForImage(at: url)
+        guard mimeType.hasPrefix("image/") else {
+            return nil
+        }
+
+        let dimensions = imageDimensions(from: data)
+        return PanelAttachment(
+            id: UUID().uuidString.lowercased(),
+            kind: "image",
+            filename: url.lastPathComponent,
+            mimeType: mimeType,
+            dataURL: "data:\(mimeType);base64,\(data.base64EncodedString())",
+            width: dimensions?.width,
+            height: dimensions?.height
+        )
+    }
+
+    private func mimeTypeForImage(at url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "gif":
+            return "image/gif"
+        case "webp":
+            return "image/webp"
+        case "tif", "tiff":
+            return "image/tiff"
+        case "bmp":
+            return "image/bmp"
+        case "heic":
+            return "image/heic"
+        default:
+            return "image/png"
+        }
+    }
+
+    private func imageDimensions(from data: Data) -> (width: Int, height: Int)? {
+        guard let image = NSImage(data: data) else {
+            return nil
+        }
+        guard let representation = image.representations.first else {
+            return nil
+        }
+        return (representation.pixelsWide, representation.pixelsHigh)
     }
 }
 

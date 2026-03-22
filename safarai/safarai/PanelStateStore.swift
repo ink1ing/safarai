@@ -1,9 +1,20 @@
 import Foundation
 
+struct PanelAttachment: Codable {
+    var id: String
+    var kind: String
+    var filename: String
+    var mimeType: String
+    var dataURL: String
+    var width: Int?
+    var height: Int?
+}
+
 struct PanelConversationMessage: Codable {
     var role: String
     var kind: String
     var text: String
+    var attachments: [PanelAttachment]? = nil
 }
 
 struct PanelContextSnapshot: Codable {
@@ -617,6 +628,56 @@ enum ChatHistoryStore {
 
     private static func threadFileURL(rootURL: URL, threadID: String) -> URL {
         threadsDirectoryURL(rootURL: rootURL).appendingPathComponent("\(threadID).json")
+    }
+}
+
+enum AgentBridgeStore {
+    private static let requestURL = SharedContainer.baseURL().appendingPathComponent("agent-bridge-request.json")
+    private static let responseURL = SharedContainer.baseURL().appendingPathComponent("agent-bridge-response.json")
+
+    static func enqueue(toolName: String, arguments: [String: Any]) throws -> String {
+        let requestId = UUID().uuidString.lowercased()
+        let payload: [String: Any] = [
+            "requestId": requestId,
+            "toolName": toolName,
+            "arguments": arguments,
+            "status": "pending",
+            "createdAt": Date().timeIntervalSince1970,
+        ]
+        try writeJSON(payload, to: requestURL)
+        try? FileManager.default.removeItem(at: responseURL)
+        return requestId
+    }
+
+    static func loadResponse(requestId: String) -> [String: Any]? {
+        guard
+            let payload = readJSON(from: responseURL),
+            String(describing: payload["requestId"] ?? "") == requestId
+        else {
+            return nil
+        }
+        return payload
+    }
+
+    static func clearResponse() {
+        try? FileManager.default.removeItem(at: responseURL)
+    }
+
+    private static func readJSON(from url: URL) -> [String: Any]? {
+        guard
+            let data = try? Data(contentsOf: url),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
+        }
+        return payload
+    }
+
+    private static func writeJSON(_ payload: [String: Any], to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
     }
 }
 

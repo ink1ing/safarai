@@ -686,6 +686,10 @@ function buildInteractiveItem(node, index) {
     role,
     type,
     enabled: enabled ? "true" : "false",
+    supportsRead: "true",
+    supportsWrite: isWritableElement(node) ? "true" : "false",
+    supportsClick: canClickInteractive(node) ? "true" : "false",
+    riskLevel: inferInteractiveRiskLevel(node),
     selectorHint: buildSelectorHint(node),
     rect: rect
       ? {
@@ -711,9 +715,35 @@ function serializeInteractiveTarget(item) {
     role: item.role,
     type: item.type,
     enabled: item.enabled,
+    supportsRead: item.supportsRead,
+    supportsWrite: item.supportsWrite,
+    supportsClick: item.supportsClick,
+    riskLevel: item.riskLevel,
     selectorHint: item.selectorHint,
     rect: item.rect,
   };
+}
+
+function inferInteractiveRiskLevel(node) {
+  if (isWritableElement(node)) {
+    return "write";
+  }
+  if (canClickInteractive(node)) {
+    return "click";
+  }
+  return "read_only";
+}
+
+function canClickInteractive(node) {
+  const tagName = getTagName(node);
+  if (!tagName) {
+    return false;
+  }
+  if (tagName === "a" || tagName === "button") {
+    return true;
+  }
+  const role = inferInteractiveRole(node);
+  return role === "button" || role === "link" || role === "tab" || role === "menuitem";
 }
 
 function compareInteractiveItems(left, right) {
