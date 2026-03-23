@@ -661,7 +661,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
                 let response = try await CodexResponseService.shared.createAgentResponse(
                     input: transcript,
-                    tools: buildAgentToolDefinitions()
+                    tools: buildAgentToolDefinitions(includeScriptTools: shouldExposeScriptTools(for: prompt))
                 )
                 latestResponseId = response["id"] as? String ?? latestResponseId
                 transcript.append(contentsOf: replayableAgentItems(from: response))
@@ -1094,7 +1094,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         return serializedWindows
     }
 
-    private func waitForSafariWindowSnapshot(timeout: TimeInterval = 6.0) async -> [[String: Any]] {
+    private func waitForSafariWindowSnapshot(timeout: TimeInterval = 12.0) async -> [[String: Any]] {
         let startedAt = Date()
         var latestSnapshot: [[String: Any]] = []
         while Date().timeIntervalSince(startedAt) < timeout {
@@ -1102,7 +1102,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             if !latestSnapshot.isEmpty {
                 return latestSnapshot
             }
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: 750_000_000)
         }
         return latestSnapshot
     }
@@ -1148,7 +1148,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func awaitSafariCallback<T>(
-        timeout: TimeInterval = 2.0,
+        timeout: TimeInterval = 4.0,
         fallback: @autoclosure @escaping () -> T,
         register: (@escaping (T) -> Void) -> Void
     ) async -> T {
@@ -1177,6 +1177,17 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
 
         return NSWorkspace.shared.open(url)
+    }
+
+    private func shouldExposeScriptTools(for prompt: String) -> Bool {
+        let normalized = prompt.lowercased()
+        return normalized.contains("script")
+            || normalized.contains("osascript")
+            || normalized.contains("applescript")
+            || normalized.contains("shell")
+            || normalized.contains("命令")
+            || normalized.contains("脚本")
+            || normalized.contains("终端")
     }
 
     private func injectLockedTabIDIfNeeded(
@@ -2276,7 +2287,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         ]
     }
 
-    private func buildAgentToolDefinitions() -> [[String: Any]] {
+    private func buildAgentToolDefinitions(includeScriptTools: Bool) -> [[String: Any]] {
         let noArgSchema: [String: Any] = [
             "type": "object",
             "properties": [:],
@@ -2303,7 +2314,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             ],
             "additionalProperties": false
         ]
-        return [
+        var tools: [[String: Any]] = [
             buildAgentTool(name: "list_safari_windows_tabs", description: "List all Safari windows and tabs with browser tab ids.", parameters: noArgSchema),
             buildAgentTool(name: "get_frontmost_tab", description: "Get the frontmost active Safari tab.", parameters: noArgSchema),
             buildAgentTool(
@@ -2394,7 +2405,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 ]
             ),
             buildAgentTool(name: "extract_structured_data", description: "Return structured data from the current page context.", parameters: pageOnlySchema),
-            buildAgentTool(
+        ]
+
+        if includeScriptTools {
+            tools += [
+                buildAgentTool(
                 name: "run_shell_command",
                 description: "Run a shell command on the host macOS machine. Use only as a fallback when dedicated Safari tools cannot complete the task.",
                 parameters: [
@@ -2408,7 +2423,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     "additionalProperties": false
                 ]
             ),
-            buildAgentTool(
+                buildAgentTool(
                 name: "run_applescript",
                 description: "Run AppleScript or JXA on the host macOS machine. Use only as a fallback when dedicated Safari tools cannot complete the task.",
                 parameters: [
@@ -2422,7 +2437,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     "additionalProperties": false
                 ]
             )
-        ]
+            ]
+        }
+
+        return tools
     }
 
     private func buildAgentTool(name: String, description: String, parameters: [String: Any]) -> [String: Any] {
