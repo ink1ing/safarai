@@ -934,7 +934,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     completion(tab)
                 }
             }
-            let refreshed = await captureSafariWindowSnapshot()
+            let refreshed = await waitForSafariWindowSnapshot()
             let tabPayload = resolvePayloadForRegisteredTab(tab, from: refreshed)
             return [
                 "ok": tabPayload != nil,
@@ -958,7 +958,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
         }
-        let refreshed = await captureSafariWindowSnapshot()
+        let refreshed = await waitForSafariWindowSnapshot()
         guard
             let frontmostWindow = refreshed.first(where: { ($0["focused"] as? Bool) == true }) ?? refreshed.first,
             let tabs = frontmostWindow["tabs"] as? [[String: Any]],
@@ -1092,6 +1092,19 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
 
         return serializedWindows
+    }
+
+    private func waitForSafariWindowSnapshot(timeout: TimeInterval = 6.0) async -> [[String: Any]] {
+        let startedAt = Date()
+        var latestSnapshot: [[String: Any]] = []
+        while Date().timeIntervalSince(startedAt) < timeout {
+            latestSnapshot = await captureSafariWindowSnapshot()
+            if !latestSnapshot.isEmpty {
+                return latestSnapshot
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return latestSnapshot
     }
 
     private func loadTabProperties(_ tab: SFSafariTab) async -> (title: String, url: String) {
@@ -2383,7 +2396,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             buildAgentTool(name: "extract_structured_data", description: "Return structured data from the current page context.", parameters: pageOnlySchema),
             buildAgentTool(
                 name: "run_shell_command",
-                description: "Run a shell command on the host macOS machine.",
+                description: "Run a shell command on the host macOS machine. Use only as a fallback when dedicated Safari tools cannot complete the task.",
                 parameters: [
                     "type": "object",
                     "properties": [
@@ -2397,7 +2410,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             ),
             buildAgentTool(
                 name: "run_applescript",
-                description: "Run AppleScript or JXA on the host macOS machine.",
+                description: "Run AppleScript or JXA on the host macOS machine. Use only as a fallback when dedicated Safari tools cannot complete the task.",
                 parameters: [
                     "type": "object",
                     "properties": [

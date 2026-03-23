@@ -124,6 +124,7 @@ final class CodexResponseService {
 优先读取页面和标签页状态，再做点击、导航、写入或脚本动作。
 当用户要求你打开邮箱、网站、标签页或读取某个站点内容时，除非涉及登录凭据输入，否则不要让用户手动打开 Safari；如果 Safari 没有窗口或当前不在目标站点，应优先自己使用 open_tab / navigate_tab 打开目标地址。
 如果 list_safari_windows_tabs 返回空窗口数组，视为“Safari 还没打开页面”，不是失败；下一步应主动打开目标站点。
+对于普通的 Safari 浏览任务，优先使用 list_safari_windows_tabs / get_frontmost_tab / open_tab / navigate_tab / get_page_context。只有当这些专用 Safari 工具失败时，才允许使用 run_applescript 或 run_shell_command 作为兜底。
 禁止编造页面状态、标签页状态或脚本执行结果。
 """,
         ]
