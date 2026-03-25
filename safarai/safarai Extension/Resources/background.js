@@ -68,7 +68,7 @@ if (browser.action?.onClicked) {
       context: stableContext,
       messages,
     });
-    await sendNativeControlRequest("show_panel", {
+    await sendNativeControlRequest("toggle_panel", {
       context: stableContext,
       messages,
     });

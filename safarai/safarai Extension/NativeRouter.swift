@@ -94,6 +94,20 @@ enum NativeRouter {
             } catch {
                 return MockNativeRouter.error(code: "show_panel_failed", message: error.localizedDescription)
             }
+        case "toggle_panel":
+            do {
+                try PanelStateWriter.save(payload: rawPayload, status: "ready")
+                try openHostURL("safarai://toggle-panel")
+                return [
+                    "ok": true,
+                    "payload": [
+                        "request_id": requestId,
+                        "answer": "已请求宿主 App 切换面板显示状态。",
+                    ],
+                ]
+            } catch {
+                return MockNativeRouter.error(code: "toggle_panel_failed", message: error.localizedDescription)
+            }
         case "sync_panel_state":
             do {
                 try PanelStateWriter.save(payload: rawPayload, status: "ready")

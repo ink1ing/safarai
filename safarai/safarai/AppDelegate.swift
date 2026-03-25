@@ -66,11 +66,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Task {
                 _ = try? await CodexOAuthService.shared.startLogin()
             }
+        } else if url.scheme == "safarai", url.host == "toggle-panel" {
+            DispatchQueue.main.async {
+                self.toggleAssistantWindow()
+            }
         } else if url.scheme == "safarai", url.host == "show-panel" {
             DispatchQueue.main.async {
                 self.presentAssistantWindow()
             }
         }
+    }
+
+    private func toggleAssistantWindow() {
+        if let visibleMainWindow = NSApp.windows.first(where: { !($0 is NSPanel) && $0.isVisible }) {
+            visibleMainWindow.orderOut(nil)
+            return
+        }
+
+        if let floatingWindow = floatingPanelController.window, floatingWindow.isVisible {
+            floatingWindow.orderOut(nil)
+            return
+        }
+
+        presentAssistantWindow()
     }
 
     private func presentAssistantWindow() {

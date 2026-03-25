@@ -1,6 +1,9 @@
 .DS_Store
 .last-build.log
 .derived-data/
+.derived-data-beta/
+.derived-data-release/
 *.xcuserstate
 **/xcuserdata/
 node_modules/
+dist/beta-*/
