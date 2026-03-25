@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_PATH="$ROOT_DIR/safarai/safarai.xcodeproj"
 SCHEME="safarai"
 DERIVED_DATA_PATH="$ROOT_DIR/.derived-data-beta"
-BUILD_CONFIGURATION="Debug"
+BUILD_CONFIGURATION="Release"
 DATE_STAMP="$(date +%Y%m%d)"
 VERSION_LABEL="beta-${DATE_STAMP}"
 OUTPUT_DIR="$ROOT_DIR/dist/$VERSION_LABEL"
@@ -48,7 +48,7 @@ Install:
 
 Notes:
 - This package is not signed or notarized.
-- Release packaging is currently blocked by a Swift compiler crash in Release optimization.
+- This package is built from the Release configuration but is still unsigned.
 - Use this build for self-testing or limited internal testing only.
 EOF
 

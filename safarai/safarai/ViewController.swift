@@ -29,21 +29,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private var copilotLoginState: [String: String]?
     private var appUpdateState: AppUpdateResult?
 
-    private final class SafariCallbackBox<T> {
-        private let lock = NSLock()
-        private var resumed = false
-
-        func resume(_ continuation: CheckedContinuation<T, Never>, value: T) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !resumed else {
-                return
-            }
-            resumed = true
-            continuation.resume(returning: value)
-        }
-    }
-
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -1386,12 +1371,22 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         register: (@escaping (T) -> Void) -> Void
     ) async -> T {
         await withCheckedContinuation { continuation in
-            let box = SafariCallbackBox<T>()
+            let lock = NSLock()
+            var resumed = false
+            let complete: (T) -> Void = { value in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resumed else {
+                    return
+                }
+                resumed = true
+                continuation.resume(returning: value)
+            }
             register { value in
-                box.resume(continuation, value: value)
+                complete(value)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
-                box.resume(continuation, value: fallback())
+                complete(fallback())
             }
         }
     }
@@ -1401,12 +1396,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         configuration.activates = true
 
         if let safariAppURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") {
-            do {
-                try NSWorkspace.shared.open([url], withApplicationAt: safariAppURL, configuration: configuration)
-                return true
-            } catch {
-                return false
-            }
+            NSWorkspace.shared.open([url], withApplicationAt: safariAppURL, configuration: configuration)
+            return true
         }
 
         return NSWorkspace.shared.open(url)
