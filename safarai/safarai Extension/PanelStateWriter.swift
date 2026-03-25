@@ -58,7 +58,13 @@ enum PanelStateWriter {
     static func saveSelectionIntent(url: String, selection: String) {
         let normalizedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedSelection = selection.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedURL.isEmpty, !normalizedSelection.isEmpty else {
+        guard !normalizedURL.isEmpty else {
+            clearSelectionIntent()
+            return
+        }
+
+        guard !normalizedSelection.isEmpty else {
+            clearSelectionIntent()
             return
         }
 
@@ -190,16 +196,24 @@ enum PanelStateWriter {
             let url = context["url"] as? String,
             !url.isEmpty
         else {
+            clearSelectionIntent()
             return
         }
 
         let selection = String(describing: context["selection"] ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selection.isEmpty else {
+            clearSelectionIntent()
             return
         }
 
         saveSelectionIntent(url: url, selection: selection)
+    }
+
+    private static func clearSelectionIntent() {
+        if FileManager.default.fileExists(atPath: selectionIntentURL.path) {
+            try? FileManager.default.removeItem(at: selectionIntentURL)
+        }
     }
 }
 

@@ -86,6 +86,14 @@
                                 </button>
                                 <button
                                     class="settings-btn"
+                                    id="sd-provider-copilot"
+                                    type="button"
+                                    onclick="sdSwitchProvider('copilot')"
+                                >
+                                    GitHub Copilot
+                                </button>
+                                <button
+                                    class="settings-btn"
                                     id="sd-provider-zed"
                                     type="button"
                                     onclick="sdSwitchProvider('zed')"
@@ -113,6 +121,48 @@
                                 <button
                                     class="settings-btn"
                                     id="sd-logout-codex"
+                                    type="button"
+                                >
+                                    Sign Out
+                                </button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div id="settings-label-copilot" class="settings-label">GitHub Copilot</div>
+                            <div class="settings-value" id="sd-copilot-login">
+                                Not signed in
+                            </div>
+                            <div
+                                class="settings-hint is-hidden"
+                                id="sd-copilot-device-hint"
+                            >
+                            </div>
+                            <div
+                                class="settings-value is-hidden"
+                                id="sd-copilot-device-code"
+                            >
+                            </div>
+                            <div
+                                class="settings-button-row"
+                                style="margin-top: 8px"
+                            >
+                                <button
+                                    class="settings-btn settings-btn-primary"
+                                    id="sd-login-copilot"
+                                    type="button"
+                                >
+                                    Sign In
+                                </button>
+                                <button
+                                    class="settings-btn"
+                                    id="sd-refresh-copilot-models"
+                                    type="button"
+                                >
+                                    Refresh Models
+                                </button>
+                                <button
+                                    class="settings-btn"
+                                    id="sd-logout-copilot"
                                     type="button"
                                 >
                                     Sign Out
@@ -194,6 +244,12 @@
                             <div id="settings-label-display" class="settings-label">Display</div>
                             <div class="settings-button-row">
                                 <button class="settings-btn" id="sd-toggle-page-info" type="button">Current Page</button>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div id="settings-label-agent" class="settings-label">Agent</div>
+                            <div class="settings-button-row">
+                                <button class="settings-btn" id="sd-toggle-agent" type="button">Enable Agent</button>
                             </div>
                         </div>
                         <div class="settings-section">

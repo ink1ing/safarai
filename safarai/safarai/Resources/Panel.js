@@ -40,6 +40,7 @@ let currentDrawerState = {
   language: "en",
   theme: "blue",
   showPageInfo: true,
+  agentEnabled: false,
   followSafariWindow: true,
   followPageColor: true,
   customSystemPrompt: "",
@@ -63,6 +64,7 @@ const I18N = {
     settings_title: "Settings",
     provider: "AI Provider",
     codex_account: "Codex Account",
+    copilot_account: "GitHub Copilot",
     zed_account: "Zed Account",
     theme: "Theme",
     language: "Language",
@@ -75,6 +77,7 @@ const I18N = {
     sign_in: "Sign In",
     sign_out: "Sign Out",
     import_zed: "Import Zed",
+    refresh_models: "Refresh Models",
     blue: "Blue",
     orange: "Orange",
     gray: "Gray",
@@ -86,11 +89,13 @@ const I18N = {
     import: "Import",
     export: "Export",
     current_page: "Current Page",
+    agent_settings: "Agent",
     save: "Save",
     remember: "Remember",
     snap_left: "Snap Left",
     snap_right: "Snap Right",
     follow_safari_button: "Follow Safari",
+    enable_agent: "Enable Agent",
     history_title: "Chat History",
     explain_page: "Explain Page",
     translate_page: "Translate Page",
@@ -124,6 +129,7 @@ const I18N = {
     settings_title: "设置",
     provider: "AI 提供商",
     codex_account: "Codex 账户",
+    copilot_account: "GitHub Copilot",
     zed_account: "Zed 账户",
     theme: "颜色风格",
     language: "语言",
@@ -136,6 +142,7 @@ const I18N = {
     sign_in: "登录",
     sign_out: "退出",
     import_zed: "导入 Zed",
+    refresh_models: "刷新模型",
     blue: "蓝色",
     orange: "橙色",
     gray: "灰色",
@@ -147,11 +154,13 @@ const I18N = {
     import: "导入",
     export: "导出",
     current_page: "当前页面",
+    agent_settings: "Agent",
     save: "保存",
     remember: "记忆位置",
     snap_left: "左吸附",
     snap_right: "右吸附",
     follow_safari_button: "跟随 Safari",
+    enable_agent: "启用 Agent",
     history_title: "聊天记录",
     explain_page: "解释页面",
     translate_page: "翻译页面",
@@ -438,8 +447,9 @@ function sendQuestion(directPrompt, options = {}) {
   pendingAttachments = [];
   renderPendingAttachments();
   const selectedFocus = resolveSelectedFocus(options);
+  const useAgentMode = agentModeEnabled && currentDrawerState.agentEnabled === true;
   webkit.messageHandlers.controller.postMessage({
-    command: agentModeEnabled ? "start-agent" : "send-question",
+    command: useAgentMode ? "start-agent" : "send-question",
     prompt,
     selectedFocus,
     attachments,
@@ -742,6 +752,15 @@ document
   .getElementById("sd-logout-codex")
   .addEventListener("click", () => sdPost("logout-codex"));
 document
+  .getElementById("sd-login-copilot")
+  .addEventListener("click", () => sdPost("start-copilot-login"));
+document
+  .getElementById("sd-refresh-copilot-models")
+  .addEventListener("click", () => sdPost("refresh-copilot-models"));
+document
+  .getElementById("sd-logout-copilot")
+  .addEventListener("click", () => sdPost("logout-copilot"));
+document
   .getElementById("sd-import-zed")
   .addEventListener("click", () => sdPost("login-zed"));
 document
@@ -777,6 +796,11 @@ document
   .getElementById("sd-toggle-page-info")
   .addEventListener("click", () => sdTogglePageInfo());
 document
+  .getElementById("sd-toggle-agent")
+  .addEventListener("click", () => sdPost("save-agent-settings", {
+    agentEnabled: !currentDrawerState.agentEnabled,
+  }));
+document
   .getElementById("sd-follow-safari-window")
   .addEventListener("click", () => sdToggleFollowSafariWindow());
 document
@@ -799,7 +823,7 @@ syncSystemPromptButtons();
 
 /**
  * Called by Swift (via renderPanelState) to sync drawer UI state.
- * payload fields: codexEmail, codexLoggedIn, zedName, zedLoggedIn,
+ * payload fields: codexEmail, codexLoggedIn, copilotLogin, copilotLoggedIn, zedName, zedLoggedIn,
  *                 activeProvider, placementMode, settingsStatus
  */
 function renderSettingsDrawerState(payload) {
@@ -813,11 +837,30 @@ function renderSettingsDrawerState(payload) {
     historyStoragePath: payload.historyStoragePath || "",
     historyStorageStatus: payload.historyStorageStatus || "",
     historyStorageUsesDefault: payload.historyStorageUsesDefault !== false,
+    agentEnabled: payload.agentEnabled === true,
     customSystemPrompt: payload.customSystemPrompt || "",
+    copilotLoginStatus: payload.copilotLoginStatus || "",
+    copilotUserCode: payload.copilotUserCode || "",
+    copilotVerificationURI: payload.copilotVerificationURI || "",
+    copilotLoginHint: payload.copilotLoginHint || "",
   };
   el("sd-codex-email").textContent = payload.codexEmail || "未登录";
   el("sd-login-codex").disabled = !!payload.codexLoggedIn;
   el("sd-logout-codex").disabled = !payload.codexLoggedIn;
+
+  const copilotPending = !payload.copilotLoggedIn && !!currentDrawerState.copilotUserCode;
+  el("sd-copilot-login").textContent = payload.copilotLogin
+    || currentDrawerState.copilotLoginStatus
+    || "未登录";
+  el("sd-copilot-device-hint").textContent = currentDrawerState.copilotLoginHint || "";
+  el("sd-copilot-device-hint").classList.toggle("is-hidden", !copilotPending);
+  el("sd-copilot-device-code").textContent = copilotPending
+    ? `Code: ${currentDrawerState.copilotUserCode}`
+    : "";
+  el("sd-copilot-device-code").classList.toggle("is-hidden", !copilotPending);
+  el("sd-login-copilot").disabled = !!payload.copilotLoggedIn || copilotPending;
+  el("sd-refresh-copilot-models").disabled = !payload.copilotLoggedIn;
+  el("sd-logout-copilot").disabled = !payload.copilotLoggedIn && !copilotPending;
 
   el("sd-zed-name").textContent = payload.zedName || "未登录";
   el("sd-import-zed").disabled = false;
@@ -825,10 +868,14 @@ function renderSettingsDrawerState(payload) {
 
   el("sd-provider-codex").dataset.active =
     payload.codexLoggedIn ? "true" : "false";
+  el("sd-provider-copilot").dataset.active =
+    payload.copilotLoggedIn ? "true" : "false";
   el("sd-provider-zed").dataset.active =
     payload.zedLoggedIn ? "true" : "false";
   el("sd-provider-codex").dataset.selected =
     payload.activeProvider === "codex" ? "true" : "false";
+  el("sd-provider-copilot").dataset.selected =
+    payload.activeProvider === "copilot" ? "true" : "false";
   el("sd-provider-zed").dataset.selected =
     payload.activeProvider === "zed" ? "true" : "false";
 
@@ -847,6 +894,8 @@ function renderSettingsDrawerState(payload) {
   languageButtonZH.dataset.active = currentDrawerState.language === "zh" ? "true" : "false";
   el("sd-toggle-page-info").dataset.active =
     currentDrawerState.showPageInfo ? "true" : "false";
+  el("sd-toggle-agent").dataset.active =
+    currentDrawerState.agentEnabled ? "true" : "false";
   el("sd-follow-safari-window").dataset.active =
     currentDrawerState.followSafariWindow ? "true" : "false";
   el("sd-follow-page-color").dataset.active =
@@ -1135,12 +1184,14 @@ function applyTranslations() {
   document.getElementById("settings-header-title").textContent = t("settings_title");
   document.getElementById("settings-label-provider").textContent = t("provider");
   document.getElementById("settings-label-codex").textContent = t("codex_account");
+  document.getElementById("settings-label-copilot").textContent = t("copilot_account");
   document.getElementById("settings-label-zed").textContent = t("zed_account");
   document.getElementById("settings-label-theme").textContent = t("theme");
   document.getElementById("settings-label-language").textContent = t("language");
   document.getElementById("settings-label-page-color").textContent = t("page_color");
   document.getElementById("settings-label-history").textContent = t("chat_history");
   document.getElementById("settings-label-display").textContent = t("display");
+  document.getElementById("settings-label-agent").textContent = t("agent_settings");
   document.getElementById("settings-label-system-prompt").textContent = t("system_prompt");
   document.getElementById("settings-label-placement").textContent = t("placement");
   document.getElementById("settings-label-follow-safari").textContent = t("follow_safari");
@@ -1148,6 +1199,9 @@ function applyTranslations() {
 
   document.getElementById("sd-login-codex").textContent = t("sign_in");
   document.getElementById("sd-logout-codex").textContent = t("sign_out");
+  document.getElementById("sd-login-copilot").textContent = t("sign_in");
+  document.getElementById("sd-refresh-copilot-models").textContent = t("refresh_models");
+  document.getElementById("sd-logout-copilot").textContent = t("sign_out");
   document.getElementById("sd-import-zed").textContent = t("import_zed");
   document.getElementById("sd-logout-zed").textContent = t("sign_out");
   document.getElementById("sd-theme-blue").textContent = t("blue");
@@ -1161,6 +1215,7 @@ function applyTranslations() {
   document.getElementById("sd-import-history").textContent = t("import");
   document.getElementById("sd-export-history").textContent = t("export");
   document.getElementById("sd-toggle-page-info").textContent = t("current_page");
+  document.getElementById("sd-toggle-agent").textContent = t("enable_agent");
   document.getElementById("sd-save-system-prompt").textContent = t("save");
   document.getElementById("sd-reset-system-prompt").textContent = t("reset_default");
   document.getElementById("sd-placement-remember").textContent = t("remember");
@@ -1214,6 +1269,14 @@ function applyTranslations() {
 }
 
 function syncAgentModeButton() {
+  if (!currentDrawerState.agentEnabled) {
+    agentModeEnabled = false;
+    agentModeButton.classList.add("is-hidden");
+    agentModeButton.dataset.active = "false";
+    return;
+  }
+
+  agentModeButton.classList.remove("is-hidden");
   agentModeButton.dataset.active = agentModeEnabled ? "true" : "false";
 }
 

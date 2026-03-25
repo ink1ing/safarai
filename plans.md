@@ -1,263 +1,316 @@
-# Safari AI Sidebar 执行计划
+# Safari AI Sidebar 实际状态与下一步计划
 
-## 执行目标
+Last updated: 2026-03-25
 
-在不重新开发 OAuth 逆向能力的前提下，用 Swift + TypeScript 完成一个可稳定运行的 Safari Sidebar 产品首版，并支持小范围测试。
+## 说明
 
-## 阶段拆分
+这份文档不再只描述理想中的 MVP 顺序，而是基于当前仓库中的真实实现来判断：
 
-### Phase 0：工程骨架与通信链路
+- 哪些部分已经完成
+- 哪些部分已经开始但还没有收口
+- 接下来最值得做的事情是什么
+
+## 当前阶段判断
+
+项目已经明显超过“Phase 0 工程骨架”。
+
+按真实代码状态判断，当前处于：
+
+- `页面理解`：已基本落地
+- `安全写入`：主链路已落地，但仍需实站验证和补强
+- `宿主面板与 Agent 扩展`：已开始超出原始 MVP
+- `架构收敛与稳定性治理`：尚未完成
+
+换句话说，项目不是“还没做出来”，而是“已经做出不少功能，但需要把范围和架构重新收束”。
+
+## 实际完成度
+
+### 1. 工程骨架与通信链路
+
+当前状态：`已完成`
+
+仓库中已经存在：
+
+- `macOS App + Safari Web Extension` Xcode 工程
+- 扩展 `background.js`、`content.js`、popup UI
+- Native Messaging 入口和宿主路由
+- 宿主面板状态落盘与同步
+
+已实现链路：
+
+- popup -> background
+- background -> content script
+- background -> native host
+- native host -> 宿主 App 状态文件 / 控制能力
+
+备注：
+
+- 原设计里的“Provider HTTP Stub”并不是当前主路径
+- 现在的真实实现已经更接近“扩展直接经 native host 调用 Swift 侧 Codex 服务”
+
+### 2. 页面理解能力
+
+当前状态：`大体完成`
+
+已实现：
+
+- 当前页面 URL、标题、选区提取
+- 正文候选区域打分与选择
+- 结构化正文抽取
+- 页面结构摘要
+- 交互元素摘要与目标索引
+- 页面视觉背景/配色提取
+- 目标站点识别：
+  - GitHub
+  - Gmail
+  - X
+  - Yahoo Mail
+
+代码依据：
+
+- `safarai Extension/Resources/shared/page-context.js`
+- `tests/page-context.test.js`
+
+当前结论：
+
+- 浏览器侧页面理解已经不是 stub，而是较完整的 DOM-first 实现
+- 这部分是目前代码库最扎实的模块之一
+
+### 3. 安全写入能力
+
+当前状态：`主链路已完成，仍需回归验证`
+
+已实现：
+
+- 聚焦输入框识别
+- 站点特化选择器回退
+- 高亮目标输入框
+- 草稿写入 textarea / input / contenteditable
+- 写入失败时降级到剪贴板
+- 明确不自动提交
+
+代码依据：
+
+- `safarai Extension/Resources/shared/write-target.js`
+- `safarai Extension/Resources/content.js`
+- `safarai Extension/Resources/background.js`
+- `tests/write-target.test.js`
+
+当前缺口：
+
+- 仍缺少针对真实 GitHub / Gmail / X / Yahoo Mail 的稳定性回归记录
+- 富文本编辑器的边界情况还没有系统验证
+
+### 4. Codex 登录、模型与回答能力
+
+当前状态：`已接入真实链路`
+
+已实现：
+
+- 宿主 App 发起 Codex OAuth
+- 本地 `localhost` 回调监听
+- token 交换与 refresh
+- 模型拉取
+- 流式回答
+
+代码依据：
+
+- `safarai/CodexOAuthService.swift`
+- `safarai/CodexModelService.swift`
+- `safarai/CodexResponseService.swift`
+
+这意味着：
+
+- 当前项目已经不是只依赖 mock 数据
+- 真正的 Codex 登录和请求链路已经落在宿主 App 中
+
+### 5. 面板 UI 与产品范围
+
+当前状态：`已经超出最初 MVP`
+
+当前宿主 App 不只是最小控制面板，还已经包含：
+
+- 独立聊天面板
+- 会话历史
+- 线程管理
+- 附件
+- 主题 / 语言 / 跟随页面色彩
+- Agent 模式 UI
+
+代码依据：
+
+- `safarai/ViewController.swift`
+- `safarai/Resources/Panel.js`
+
+这和最初“最小 Sidebar 产品”的差异很重要：
+
+- 现在的产品方向更像“Safari 上下文聊天面板 + 页内 agent”
+- 如果不主动收敛，范围会继续膨胀
+
+## 已验证内容
+
+### 自动化测试
+
+2026-03-25 已执行：
+
+```bash
+node --test tests/*.test.js
+```
+
+结果：
+
+- `23 / 23` 通过
+
+覆盖范围：
+
+- 协议对象
+- 页面上下文抽取
+- 写入目标解析与写入
+- 会话裁剪
+- 日志裁剪
+
+### 本地构建现状
+
+2026-03-25 执行命令行构建时，`xcodebuild` 当前停在扩展签名阶段：
+
+- `Command CodeSign failed with a nonzero exit code`
+
+这说明：
+
+- 工程本身是可识别的
+- target / scheme 存在
+- 但本地 CLI 构建还没有清理到“稳定可复现”
+
+## 当前最主要的问题
+
+### 1. 架构与设计文档已经不一致
+
+设计文档强调：
+
+- Sidebar 单入口
+- Provider 走本地 HTTP 黑盒
+- 最小范围的读写助手
+
+实际代码已经变成：
+
+- 扩展 + popup + 独立桌面面板并行
+- Swift 直接承担 Codex 请求职责
+- 出现 Agent 化能力和更大的桌面聊天产品形态
+
+### 2. Provider 抽象还没有真正立住
+
+原本想要的边界是：
+
+- 扩展 / 宿主只依赖统一 Provider 接口
+
+当前实际情况是：
+
+- Swift 代码直接调用 Codex 后端
+- 扩展 target 和 app target 都有账户/OAuth/模型相关实现
+
+这会直接增加：
+
+- 维护成本
+- 替换 provider 的难度
+- 调试和一致性风险
+
+### 3. 稳定性验证还不够系统
+
+虽然单测已经有基础，但还缺：
+
+- 跨站点手工回归清单执行记录
+- end-to-end 自动化验证
+- 页面刷新、DOM 重挂载、扩展重载后的连续验证
+
+## 建议的下一阶段计划
+
+接下来不要继续无节制扩展功能，先做收敛。
+
+### Phase A：产品范围收口
 
 目标：
 
-- 建立 `macOS App + Safari Web Extension` 工程
-- 打通 Sidebar、background、content script、Host App 之间的消息链路
-- 完成 ProviderAdapter 的本地 HTTP Stub
+- 明确产品主入口到底是：
+  - Safari popup/sidebar
+  - 独立宿主面板
+  - 两者并存
 
-交付：
+必须输出：
 
-- Sidebar 可展示当前 tab 的 URL、标题、选中内容
-- Host App 能收到扩展请求并返回 mock 数据
+- 一份新的产品边界说明
+- 保留功能与暂缓功能列表
 
-测试：
+如果不先做这一步，后面的代码会继续分叉。
 
-- 单元测试：消息体编解码
-- 集成测试：Sidebar -> background -> Host App -> Sidebar 往返链路
-
-### Phase 1：页面理解能力
+### Phase B：Provider 架构收敛
 
 目标：
 
-- 提取页面正文、标题、URL、选区
-- 完成会话 UI 最小版本
-- 接入真实 Provider 黑盒
+- 把 Codex 调用收敛到单一 provider 边界
+- 减少 app target / extension target 中重复的 OAuth、模型、账户逻辑
 
-交付：
+建议结果：
 
-- 总结页面
-- 解释选中内容
-- 针对页面问答
+- 一个清晰的 Provider 服务层
+- 一个统一的账户配置读写入口
+- NativeRouter 不再承载过多业务细节
 
-测试：
-
-- GitHub README 页面
-- 普通博客文章页
-- 文档页面
-
-验收标准：
-
-- 三类页面都能稳定返回有效回答
-
-### Phase 2：安全写入能力
+### Phase C：站点级稳定性验证
 
 目标：
 
-- 检测当前聚焦输入框
-- 生成草稿
-- 高亮目标
-- 用户确认后写入页面
+- 针对 GitHub、Gmail、X、Yahoo Mail 执行固定回归
 
-交付：
+最少验证项：
 
-- “写入当前输入框”操作链路完整可用
-- 不自动提交
+- 页面总结
+- 选中文本解释
+- 问答
+- 草稿生成
+- 写入确认
+- 写入失败降级
+- 页面刷新后恢复
 
-测试：
-
-- GitHub 评论框
-- Gmail 回复框
-- X 发帖或回复框
-
-验收标准：
-
-- 至少 3 个不同类型输入区域写入成功
-
-### Phase 3：站点适配与稳定性
+### Phase D：构建与分发清理
 
 目标：
 
-- 补齐 X、Yahoo Mail 适配
-- 加入错误提示、超时、重试、状态恢复
-- 建立本地日志机制
+- 解决扩展签名与命令行构建问题
+- 形成稳定安装流程
 
-交付：
+交付物：
 
-- 四个目标站点均有最低可用支持
-- 页面刷新或切换后会话可恢复
+- 本地可复现 build 步骤
+- Safari 扩展开启说明
+- 宿主 App 首次登录与调试步骤
 
-测试：
+## 当前优先级排序
 
-- 页面导航中断
-- 页面刷新
-- Host App 未启动
-- Provider 超时
-- DOM 变动后重定位
+建议按下面顺序推进：
 
-验收标准：
-
-- 连续使用 3 天无高频失联或误写入
-
-### Phase 4：小范围测试版
-
-目标：
-
-- 打包与安装流程整理
-- 日志导出
-- 调试开关
-- 版本号与最小升级策略
-
-交付：
-
-- 你自己可长期使用的测试版本
-- 少量用户可手动安装并回报问题
-
-测试：
-
-- 新设备安装
-- Safari 扩展启用流程
-- Host App 首次启动
-- 日志导出与问题定位
-
-验收标准：
-
-- 2 到 5 人能够完成安装并成功使用核心功能
-
-## 开发顺序
-
-按实现性与稳定性优先，推荐固定顺序：
-
-1. 工程骨架
-2. Provider Stub
-3. 页面读取
-4. GitHub 适配
-5. Gmail 适配
-6. X 适配
-7. Yahoo Mail 适配
-8. 错误恢复与日志
-
-不要并行推进四个站点，否则 DOM 适配成本会放大。
-
-## 每周计划
-
-### 第 1 周
-
-- 建立 Xcode 工程与 Safari Sidebar
-- 打通消息链路
-- 建立统一消息协议
-- 做 Provider Stub
-- 实现当前页面基础上下文获取
-
-### 第 2 周
-
-- 接真实 Provider
-- 实现会话 UI
-- 完成 GitHub 页面读取与写入
-- 完成 GitHub 回归测试
-
-### 第 3 周
-
-- 实现 Gmail 页面读取与写入
-- 实现 X 页面读取与写入
-- 修复输入框识别和高亮逻辑
-
-### 第 4 周
-
-- 实现 Yahoo Mail 最低支持
-- 加入日志、错误提示、timeout、retry
-- 小范围测试版打包
-
-## 测试计划
-
-### 单元测试
-
-- 页面上下文对象
-- 消息 schema
-- Provider 请求封装
-- 输入框识别逻辑
-- 会话状态机
-
-### 集成测试
-
-- 扩展到宿主 App 的消息转发
-- Provider 调用失败路径
-- 页面写入确认流程
-
-### 手工回归测试清单
-
-GitHub：
-
-- README 总结
-- PR 评论草稿
-- Issue 评论草稿
-
-Gmail：
-
-- 单封邮件总结
-- 邮件线程总结
-- 回复框草稿写入
-
-X：
-
-- 帖文解释
-- 帖文总结
-- 回复框草稿写入
-
-Yahoo Mail：
-
-- 邮件总结
-- 回信草稿
-
-### 稳定性验证
-
-- 扩展重载后是否恢复
-- 页面刷新后是否恢复
-- Host App 未启动时是否提示明确错误
-- Provider 超时后是否 graceful fail
-- 写入失败时是否污染页面
-
-## 风险与对应策略
-
-### 风险 1：页面 DOM 差异大
-
-策略：
-
-- 通用抽取器 + 站点适配器
-- 首版仅覆盖明确目标站点
-
-### 风险 2：富文本编辑器难以稳定写入
-
-策略：
-
-- 优先支持 textarea 与基础 contenteditable
-- 对复杂编辑器允许降级到复制草稿
-
-### 风险 3：Provider 黑盒不稳定
-
-策略：
-
-- 统一 ProviderClient
-- 所有请求加 timeout、request_id、错误码
-
-### 风险 4：Safari 扩展调试复杂
-
-策略：
-
-- 本地结构化日志
-- 每次请求全链路打 request_id
+1. 先决定产品主形态，停止继续扩范围。
+2. 收敛 Provider / OAuth / account 相关实现。
+3. 补四个目标站点的真实回归验证。
+4. 修复构建签名与安装链路。
+5. 再考虑继续扩展 agent、多步操作或更多 UI 能力。
 
 ## 阶段性验收标准
 
-### 必须满足
+下一轮不再以“功能更多”为成功标准，而以“更稳、更清晰”为标准。
 
-- Sidebar 始终可打开
-- 页面上下文能稳定提取
-- AI 返回结果可展示
-- 写入永不自动提交
-- 写入前始终有确认环节
+必须满足：
 
-### 可以后延
+- 主入口定义清楚
+- Provider 边界清楚
+- 四个目标站点最小链路可回归
+- 写入仍然保持不自动提交
+- 项目可在本地稳定构建和启动
 
-- 复杂多步 agent
+可以后延：
+
+- 更复杂的 agent 编排
+- 更多站点
+- 更丰富的桌面聊天能力
 - 页面自动点击
 - 多 Provider 切换
 - 高级工作流模板

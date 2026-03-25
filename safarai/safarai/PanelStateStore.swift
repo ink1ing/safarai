@@ -733,10 +733,16 @@ enum PanelStateStore {
             return nil
         }
 
-        if let url, !url.isEmpty, value.url == url {
-            return value
+        if let url, !url.isEmpty {
+            return value.url == url ? value : nil
         }
 
         return value
+    }
+
+    static func clearSelectionIntent() {
+        if FileManager.default.fileExists(atPath: selectionIntentURL.path) {
+            try? FileManager.default.removeItem(at: selectionIntentURL)
+        }
     }
 }

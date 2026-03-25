@@ -210,10 +210,6 @@ async function syncSelectionFromContent(tabId, payload) {
   }
 
   const nextSelection = String(payload?.selection ?? "").trim();
-  if (!nextSelection) {
-    return createSuccessResponse({ synced: false });
-  }
-
   const currentContext = TAB_STATE.get(resolvedTabId) ?? {};
   const nextURL = String(payload?.url ?? currentContext.url ?? "");
   const nextContext = {
@@ -1594,22 +1590,15 @@ function mergeStableSelection(previousContext, nextContext, source = "") {
     return nextContext;
   }
 
-  const nextURL = String(nextContext.url ?? "");
   const nextSelection = String(nextContext.selection ?? "").trim();
-  const previousURL = String(previousContext?.url ?? "");
-  const previousSelection = String(previousContext?.selection ?? "").trim();
-  const mergedSelection =
-    !nextSelection && nextURL && previousURL === nextURL && previousSelection
-      ? previousSelection
-      : nextSelection;
 
   return {
     ...nextContext,
-    selection: mergedSelection,
+    selection: nextSelection,
     debugSelection: {
       ...(nextContext.debugSelection ?? {}),
-      backgroundPreviousSelection: truncateDebugValue(previousSelection),
-      backgroundMergedSelection: truncateDebugValue(mergedSelection),
+      backgroundPreviousSelection: truncateDebugValue(previousContext?.selection ?? ""),
+      backgroundMergedSelection: truncateDebugValue(nextSelection),
       backgroundSource: source,
     },
   };

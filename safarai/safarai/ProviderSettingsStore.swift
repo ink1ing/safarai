@@ -31,6 +31,7 @@ struct ProviderSettings: Codable {
 
 enum ActiveProvider: String, Codable {
     case codex
+    case copilot
     case zed
 }
 

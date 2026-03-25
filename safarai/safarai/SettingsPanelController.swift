@@ -41,11 +41,14 @@ final class SettingsPanelController: NSWindowController, WKScriptMessageHandler 
 
     func pushState(status: String? = nil) {
         let codexConfig = CodexAccountStore.load()
+        let copilotConfig = CopilotAccountStore.load()
         let zedConfig = ZedAccountStore.load()
         let activeProvider = ProviderSettingsStore.loadActiveProvider()
         evaluate(function: "renderSettingsState", payload: [
             "codexEmail": codexConfig?.account.email as Any,
             "codexLoggedIn": codexConfig != nil,
+            "copilotLogin": copilotConfig?.account.login as Any,
+            "copilotLoggedIn": copilotConfig != nil,
             "zedName": zedConfig?.account.name as Any,
             "zedLoggedIn": zedConfig != nil,
             "activeProvider": activeProvider.rawValue,
@@ -73,6 +76,17 @@ final class SettingsPanelController: NSWindowController, WKScriptMessageHandler 
         } else if command == "login" {
             onLogin?()
             pushState(status: "正在拉起登录…")
+        } else if command == "logout-copilot" {
+            do {
+                try CopilotAccountStore.clear()
+                if ProviderSettingsStore.loadActiveProvider() == .copilot {
+                    try ProviderSettingsStore.saveActiveProvider(.codex)
+                }
+                pushState(status: "GitHub Copilot 已登出")
+                onLogout?()
+            } catch {
+                pushState(status: error.localizedDescription)
+            }
         } else if command == "logout-zed" {
             do {
                 try ZedAccountStore.clear()
@@ -106,7 +120,15 @@ final class SettingsPanelController: NSWindowController, WKScriptMessageHandler 
             if let provider = ActiveProvider(rawValue: rawValue) {
                 do {
                     try ProviderSettingsStore.saveActiveProvider(provider)
-                    let name = provider == .zed ? "Zed" : "Codex"
+                    let name: String
+                    switch provider {
+                    case .codex:
+                        name = "Codex"
+                    case .copilot:
+                        name = "GitHub Copilot"
+                    case .zed:
+                        name = "Zed"
+                    }
                     pushState(status: "已切换到 \(name)")
                     onLogout?()  // reuse to trigger panel refresh
                 } catch {
@@ -238,6 +260,7 @@ final class SettingsPanelController: NSWindowController, WKScriptMessageHandler 
               <div class="label">AI 提供商</div>
               <div class="button-row">
                 <button id="provider-codex" type="button" onclick="switchProvider('codex')">Codex</button>
+                <button id="provider-copilot" type="button" onclick="switchProvider('copilot')">GitHub Copilot</button>
                 <button id="provider-zed" type="button" onclick="switchProvider('zed')">Zed</button>
               </div>
             </div>
@@ -247,6 +270,13 @@ final class SettingsPanelController: NSWindowController, WKScriptMessageHandler 
               <div class="button-row" style="margin-top:8px">
                 <button id="login-button" type="button">登录</button>
                 <button id="logout-button" type="button">退出</button>
+              </div>
+            </div>
+            <div class="section">
+              <div class="label">GitHub Copilot</div>
+              <div class="value" id="copilot-login">未登录</div>
+              <div class="button-row" style="margin-top:8px">
+                <button id="logout-copilot-button" type="button">退出</button>
               </div>
             </div>
             <div class="section">
@@ -283,6 +313,9 @@ final class SettingsPanelController: NSWindowController, WKScriptMessageHandler 
             document.getElementById('logout-button').addEventListener('click', () => {
               webkit.messageHandlers.settings.postMessage({ command: 'logout' });
             });
+            document.getElementById('logout-copilot-button').addEventListener('click', () => {
+              webkit.messageHandlers.settings.postMessage({ command: 'logout-copilot' });
+            });
             document.getElementById('import-zed-button').addEventListener('click', () => {
               webkit.messageHandlers.settings.postMessage({ command: 'import-zed' });
             });
@@ -291,12 +324,15 @@ final class SettingsPanelController: NSWindowController, WKScriptMessageHandler 
             });
             function renderSettingsState(payload) {
               document.getElementById('codex-email').textContent = payload.codexEmail || '未登录';
+              document.getElementById('copilot-login').textContent = payload.copilotLogin || '未登录';
               document.getElementById('login-button').disabled = payload.codexLoggedIn;
               document.getElementById('logout-button').disabled = !payload.codexLoggedIn;
+              document.getElementById('logout-copilot-button').disabled = !payload.copilotLoggedIn;
               document.getElementById('zed-name').textContent = payload.zedName || '未登录';
               document.getElementById('import-zed-button').disabled = false;
               document.getElementById('logout-zed-button').disabled = !payload.zedLoggedIn;
               document.getElementById('provider-codex').dataset.active = payload.activeProvider === 'codex' ? 'true' : 'false';
+              document.getElementById('provider-copilot').dataset.active = payload.activeProvider === 'copilot' ? 'true' : 'false';
               document.getElementById('provider-zed').dataset.active = payload.activeProvider === 'zed' ? 'true' : 'false';
               document.getElementById('placement-remember').dataset.active = payload.placementMode === 'remember' ? 'true' : 'false';
               document.getElementById('placement-left').dataset.active = payload.placementMode === 'left' ? 'true' : 'false';

@@ -393,10 +393,6 @@ function clearBootstrapSyncTimers() {
 
 function syncStableSelection() {
   const selection = String(lastStableSelection || "").trim();
-  if (!selection) {
-    return;
-  }
-
   browser.runtime.sendMessage({
     type: "content:selection-updated",
     payload: {
@@ -437,12 +433,7 @@ async function extractContextSnapshot() {
   if (selection) {
     lastStableSelection = selection;
     lastStableSelectionURL = window.location.href;
-  } else if (
-    lastStableSelection &&
-    lastStableSelectionURL === window.location.href
-  ) {
-    context.selection = lastStableSelection;
-  } else if (lastStableSelectionURL !== window.location.href) {
+  } else {
     lastStableSelection = "";
     lastStableSelectionURL = window.location.href;
   }
@@ -632,6 +623,8 @@ function inferSchemeFromColorLite(value) {
 function rememberCurrentSelection() {
   const selection = String(window.getSelection?.()?.toString?.() ?? "").trim();
   if (!selection) {
+    lastStableSelection = "";
+    lastStableSelectionURL = window.location.href;
     return;
   }
 

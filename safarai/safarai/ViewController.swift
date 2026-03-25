@@ -26,6 +26,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private var safariToolTabRegistry: [Int: SFSafariTab] = [:]
     private var nextSafariToolWindowID = 1
     private var nextSafariToolTabID = 1
+    private var copilotLoginState: [String: String]?
 
     private final class SafariCallbackBox<T> {
         private let lock = NSLock()
@@ -139,6 +140,12 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             logoutCodex()
         case "refresh-codex-models":
             refreshCodexModels()
+        case "start-copilot-login":
+            startCopilotLogin()
+        case "logout-copilot":
+            logoutCopilot()
+        case "refresh-copilot-models":
+            refreshCopilotModels()
         case "login-zed":
             loginZed()
         case "logout-zed":
@@ -225,6 +232,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             } catch {
                 pushError(error.localizedDescription)
             }
+        case "save-agent-settings":
+            do {
+                try saveAgentEnabledSetting(body["agentEnabled"] as? Bool)
+                pushPanelState(status: AppText.localized(en: "Agent setting updated.", zh: "Agent 设置已更新。"))
+            } catch {
+                pushError(error.localizedDescription)
+            }
         case "save-follow-safari-window-settings":
             do {
                 try saveFollowSafariWindowSetting(body["followSafariWindow"] as? Bool)
@@ -301,8 +315,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private func logoutCodex() {
         do {
             try CodexAccountStore.clear()
-            if ProviderSettingsStore.loadActiveProvider() == .codex, ZedAccountStore.load() != nil {
-                try? ProviderSettingsStore.saveActiveProvider(.zed)
+            if ProviderSettingsStore.loadActiveProvider() == .codex {
+                let fallbackProvider = resolvedActiveProvider(
+                    codexConfig: nil,
+                    copilotConfig: CopilotAccountStore.load(),
+                    zedConfig: ZedAccountStore.load()
+                )
+                try? ProviderSettingsStore.saveActiveProvider(fallbackProvider)
             }
             pushPanelState(status: AppText.localized(en: "Signed out of Codex.", zh: "已登出 Codex。"))
         } catch {
@@ -335,6 +354,123 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
     }
 
+    private func startCopilotLogin() {
+        pushPanelState(status: AppText.localized(en: "Checking GitHub Copilot credentials…", zh: "正在检查 GitHub Copilot 凭据…"))
+        Task {
+            do {
+                var config = try await CopilotOAuthService.shared.importLocalAccountIfAvailable()
+                if config == nil {
+                    let session = try await CopilotOAuthService.shared.startDeviceFlow()
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(session.userCode, forType: .string)
+                    if let url = URL(string: session.verificationURI) {
+                        NSWorkspace.shared.open(url)
+                    }
+
+                    await MainActor.run {
+                        self.copilotLoginState = [
+                            "status": AppText.localized(
+                                en: "Waiting for GitHub authorization",
+                                zh: "等待 GitHub 完成授权"
+                            ),
+                            "userCode": session.userCode,
+                            "verificationURI": session.verificationURI,
+                            "hint": AppText.localized(
+                                en: "Enter this code on GitHub after signing in.",
+                                zh: "登录 GitHub 后，在授权页面输入这个验证码。"
+                            ),
+                        ]
+                    }
+
+                    await MainActor.run {
+                        self.pushPanelState(
+                            status: AppText.localized(
+                                en: "Open GitHub and enter code \(session.userCode). The code has been copied to your clipboard.",
+                                zh: "请在 GitHub 输入验证码 \(session.userCode)。验证码已复制到剪贴板。"
+                            )
+                        )
+                    }
+
+                    config = try await CopilotOAuthService.shared.completeDeviceFlow(session: session)
+                }
+
+                guard var resolvedConfig = config else {
+                    throw CopilotOAuthError.deviceAuthorizationFailed("No GitHub Copilot account was imported or authorized.")
+                }
+
+                await MainActor.run {
+                    self.copilotLoginState = nil
+                }
+                let models = try await CopilotResponseService.shared.fetchModels(configuration: resolvedConfig)
+                resolvedConfig.model.available = models
+                resolvedConfig.model.lastSyncAt = Date().timeIntervalSince1970
+                if !models.isEmpty {
+                    resolvedConfig.model.selected = models.first!.id
+                }
+                try CopilotAccountStore.save(resolvedConfig)
+                try? ProviderSettingsStore.saveActiveProvider(.copilot)
+                pushPanelState(
+                    status: AppText.localized(
+                        en: "GitHub Copilot signed in. \(models.count) models available.",
+                        zh: "GitHub Copilot 登录成功，共 \(models.count) 个模型。"
+                    )
+                )
+            } catch {
+                await MainActor.run {
+                    self.copilotLoginState = nil
+                }
+                pushError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func logoutCopilot() {
+        do {
+            try CopilotAccountStore.clear()
+            copilotLoginState = nil
+            if ProviderSettingsStore.loadActiveProvider() == .copilot {
+                let fallbackProvider = resolvedActiveProvider(
+                    codexConfig: CodexAccountStore.load(),
+                    copilotConfig: nil,
+                    zedConfig: ZedAccountStore.load()
+                )
+                try? ProviderSettingsStore.saveActiveProvider(fallbackProvider)
+            }
+            pushPanelState(status: AppText.localized(en: "Signed out of GitHub Copilot.", zh: "已登出 GitHub Copilot。"))
+        } catch {
+            pushError(error.localizedDescription)
+        }
+    }
+
+    private func refreshCopilotModels() {
+        guard var config = CopilotAccountStore.load() else {
+            pushError(AppText.localized(en: "Not signed in to GitHub Copilot.", zh: "当前未登录 GitHub Copilot。"))
+            return
+        }
+
+        pushPanelState(status: AppText.localized(en: "Refreshing GitHub Copilot models…", zh: "正在刷新 GitHub Copilot 模型列表…"))
+        Task {
+            do {
+                let models = try await CopilotResponseService.shared.fetchModels(configuration: config)
+                config.model.available = models
+                config.model.lastSyncAt = Date().timeIntervalSince1970
+                if !models.isEmpty && !models.contains(where: { $0.id == config.model.selected }) {
+                    config.model.selected = models.first!.id
+                }
+                try CopilotAccountStore.save(config)
+                pushPanelState(
+                    status: AppText.localized(
+                        en: "GitHub Copilot models refreshed: \(models.count).",
+                        zh: "GitHub Copilot 模型列表已刷新，共 \(models.count) 个。"
+                    )
+                )
+            } catch {
+                pushError(error.localizedDescription)
+            }
+        }
+    }
+
     private func saveSelectedModel(_ body: [String: Any]) {
         let selectedValue = (body["selectedModel"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -352,6 +488,25 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         )
 
         switch selection.provider {
+        case .copilot:
+            guard var configuration = CopilotAccountStore.load() else {
+                pushError(AppText.localized(en: "Not signed in to GitHub Copilot.", zh: "当前未登录 GitHub Copilot。"))
+                return
+            }
+            guard configuration.model.available.contains(where: { $0.id == selection.modelID }) else {
+                pushError(AppText.localized(en: "The selected model is not available in GitHub Copilot.", zh: "所选模型在 GitHub Copilot 模型列表中不存在。"))
+                return
+            }
+            configuration.model.selected = selection.modelID
+            do {
+                try CopilotAccountStore.save(configuration)
+                try ProviderSettingsStore.saveActiveProvider(.copilot)
+                try saveUISettings(reasoningEffort: reasoningEffort)
+                pushPanelState(status: AppText.localized(en: "Model saved.", zh: "模型已保存。"))
+            } catch {
+                pushError(error.localizedDescription)
+            }
+
         case .zed:
             guard var configuration = ZedAccountStore.load() else {
                 pushError(AppText.localized(en: "Not signed in to Zed.", zh: "当前未登录 Zed。"))
@@ -415,8 +570,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private func logoutZed() {
         do {
             try ZedAccountStore.clear()
-            if ProviderSettingsStore.loadActiveProvider() == .zed, CodexAccountStore.load() != nil {
-                try? ProviderSettingsStore.saveActiveProvider(.codex)
+            if ProviderSettingsStore.loadActiveProvider() == .zed {
+                let fallbackProvider = resolvedActiveProvider(
+                    codexConfig: CodexAccountStore.load(),
+                    copilotConfig: CopilotAccountStore.load(),
+                    zedConfig: nil
+                )
+                try? ProviderSettingsStore.saveActiveProvider(fallbackProvider)
             }
             pushPanelState(status: AppText.localized(en: "Signed out of Zed.", zh: "已登出 Zed。"))
         } catch {
@@ -452,7 +612,15 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
         do {
             try ProviderSettingsStore.saveActiveProvider(provider)
-            let name = provider == .zed ? "Zed" : "Codex"
+            let name: String
+            switch provider {
+            case .codex:
+                name = "Codex"
+            case .copilot:
+                name = "GitHub Copilot"
+            case .zed:
+                name = "Zed"
+            }
             pushPanelState(status: AppText.localized(en: "Switched to \(name).", zh: "已切换到 \(name)。"))
         } catch {
             pushError(error.localizedDescription)
@@ -518,6 +686,14 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                         selectedFocus: selectedFocus,
                         attachments: attachments
                     )
+                } else if activeProvider == .copilot {
+                    stream = CopilotResponseService.shared.streamQuestion(
+                        prompt: resolvedPrompt,
+                        context: contextSnapshot,
+                        history: historySnapshot,
+                        selectedFocus: selectedFocus,
+                        attachments: attachments
+                    )
                 } else {
                     stream = CodexResponseService.shared.streamQuestion(
                         prompt: resolvedPrompt,
@@ -570,6 +746,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     }
 
     private func startAgent(_ body: [String: Any]) {
+        guard loadAgentEnabled() else {
+            pushPanelState(status: AppText.localized(en: "Agent is disabled in settings.", zh: "Agent 已在设置中关闭。"))
+            return
+        }
         guard agentTask == nil else {
             pushPanelState(status: AppText.localized(en: "Agent is already running.", zh: "Agent 正在运行。"))
             return
@@ -1659,17 +1839,24 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         let baseSnapshot = snapshot ?? PanelStateStore.load()
         let snapshot = ensureHistorySnapshot(baseSnapshot)
         let codexConfig = configuration ?? CodexAccountStore.load()
+        let copilotConfig = CopilotAccountStore.load()
         let zedConfig = ZedAccountStore.load()
-        let isLoggedIn = codexConfig != nil || zedConfig != nil
-        let activeProvider = resolvedActiveProvider(codexConfig: codexConfig, zedConfig: zedConfig)
-        let bothLoggedIn = codexConfig != nil && zedConfig != nil
+        let isLoggedIn = codexConfig != nil || copilotConfig != nil || zedConfig != nil
+        let activeProvider = resolvedActiveProvider(
+            codexConfig: codexConfig,
+            copilotConfig: copilotConfig,
+            zedConfig: zedConfig
+        )
+        let loggedInProviderCount = [codexConfig != nil, copilotConfig != nil, zedConfig != nil]
+            .filter { $0 }
+            .count
+        let showSource = loggedInProviderCount > 1
         let historyThreads = ChatHistoryStore.listThreads()
         let historyStorageState = ChatHistoryStore.storageState()
-        let selectionIntent = PanelStateStore.loadSelectionIntent(matchingURL: snapshot?.context?.url)
         let debugSelection = buildSelectionDebug(
             snapshotSelection: snapshot?.context?.selection,
             snapshotDebug: snapshot?.context?.debugSelection,
-            selectionIntent: selectionIntent?.selection
+            selectionIntent: nil
         )
 
         if isLoggedIn, activeProvider != ProviderSettingsStore.loadActiveProvider() {
@@ -1678,25 +1865,40 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
         let availableModels = buildAvailableModels(
             codexConfig: codexConfig,
+            copilotConfig: copilotConfig,
             zedConfig: zedConfig,
-            showSource: bothLoggedIn
+            showSource: showSource
         )
 
         let selectedModel: String
         switch activeProvider {
+        case .copilot:
+            selectedModel = modelOptionID(provider: .copilot, modelID: copilotConfig?.model.selected ?? "")
         case .zed:
             selectedModel = modelOptionID(provider: .zed, modelID: zedConfig?.model.selected ?? "")
         case .codex:
             selectedModel = modelOptionID(provider: .codex, modelID: codexConfig?.model.selected ?? "")
         }
 
-        let email: Any = activeProvider == .zed
-            ? jsonValue(zedConfig?.account.name)
-            : jsonValue(codexConfig?.account.email)
+        let email: Any
+        switch activeProvider {
+        case .codex:
+            email = jsonValue(codexConfig?.account.email)
+        case .copilot:
+            email = jsonValue(copilotConfig?.account.login)
+        case .zed:
+            email = jsonValue(zedConfig?.account.name)
+        }
 
         let drawerState: [String: Any] = [
             "codexEmail": jsonValue(codexConfig?.account.email),
             "codexLoggedIn": codexConfig != nil,
+            "copilotLogin": jsonValue(copilotConfig?.account.login),
+            "copilotLoggedIn": copilotConfig != nil,
+            "copilotLoginStatus": jsonValue(copilotLoginState?["status"]),
+            "copilotUserCode": jsonValue(copilotLoginState?["userCode"]),
+            "copilotVerificationURI": jsonValue(copilotLoginState?["verificationURI"]),
+            "copilotLoginHint": jsonValue(copilotLoginState?["hint"]),
             "zedName": jsonValue(zedConfig?.account.name),
             "zedLoggedIn": zedConfig != nil,
             "activeProvider": activeProvider.rawValue,
@@ -1706,6 +1908,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "showPageInfo": loadShowPageInfo(),
             "followSafariWindow": loadFollowSafariWindow(),
             "followPageColor": loadFollowPageColor(),
+            "agentEnabled": loadAgentEnabled(),
             "historyStoragePath": historyStorageState.displayPath,
             "historyStorageStatus": historyStorageState.status,
             "historyStorageUsesDefault": historyStorageState.usesDefault,
@@ -1721,6 +1924,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "activeProvider": activeProvider.rawValue,
             "language": loadLanguage(),
             "showPageInfo": loadShowPageInfo(),
+            "agentEnabled": loadAgentEnabled(),
             "historyStoragePath": historyStorageState.displayPath,
             "historyStorageStatus": historyStorageState.status,
             "drawerState": drawerState
@@ -1748,7 +1952,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 "url": jsonValue(snapshot?.context?.url),
                 "title": jsonValue(snapshot?.context?.title),
                 "selection": jsonValue(snapshot?.context?.selection),
-                "selectionFocusText": jsonValue(selectionIntent?.selection),
+                "selectionFocusText": jsonValue(snapshot?.context?.selection),
                 "selectionDebug": debugSelection,
                 "metadata": snapshot?.context?.metadata ?? [:],
                 "updatedAt": jsonValue(snapshot?.updatedAt)
@@ -2022,6 +2226,15 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         try writeUISettings(payload)
     }
 
+    private func saveAgentEnabledSetting(_ rawValue: Bool?) throws {
+        var payload = normalizedUISettings(loadUISettings())
+        payload["agent_enabled"] = rawValue ?? false
+        try writeUISettings(payload)
+        if !(rawValue ?? false), agentTask != nil {
+            cancelAgent()
+        }
+    }
+
     private func saveCustomSystemPrompt(_ rawValue: String?) throws {
         var payload = normalizedUISettings(loadUISettings())
         payload["custom_system_prompt"] = normalizeCustomSystemPrompt(rawValue)
@@ -2088,8 +2301,13 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         normalizedUISettings(loadUISettings())["follow_page_color"] as? Bool ?? true
     }
 
+    private func loadAgentEnabled() -> Bool {
+        normalizedUISettings(loadUISettings())["agent_enabled"] as? Bool ?? false
+    }
+
     private func resolvedActiveProvider(
         codexConfig: CodexAccountConfiguration? = CodexAccountStore.load(),
+        copilotConfig: CopilotAccountConfiguration? = CopilotAccountStore.load(),
         zedConfig: ZedAccountConfiguration? = ZedAccountStore.load()
     ) -> ActiveProvider {
         let storedProvider = ProviderSettingsStore.loadActiveProvider()
@@ -2097,9 +2315,17 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         switch storedProvider {
         case .codex where codexConfig != nil:
             return .codex
+        case .copilot where copilotConfig != nil:
+            return .copilot
         case .zed where zedConfig != nil:
             return .zed
         default:
+            if codexConfig != nil {
+                return .codex
+            }
+            if copilotConfig != nil {
+                return .copilot
+            }
             if zedConfig != nil, codexConfig == nil {
                 return .zed
             }
@@ -2109,10 +2335,21 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private func buildAvailableModels(
         codexConfig: CodexAccountConfiguration?,
+        copilotConfig: CopilotAccountConfiguration?,
         zedConfig: ZedAccountConfiguration?,
         showSource: Bool
     ) -> [[String: Any]] {
         var models: [[String: Any]] = []
+
+        if let copilotConfig {
+            models += copilotConfig.model.available.map { model in
+                [
+                    "id": modelOptionID(provider: .copilot, modelID: model.id),
+                    "label": showSource ? "\(model.label) from copilot" : model.label,
+                    "displayLabel": model.label
+                ]
+            }
+        }
 
         if let zedConfig {
             models += zedConfig.model.available.map { model in
@@ -2195,6 +2432,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "show_page_info": payload["show_page_info"] as? Bool ?? true,
             "follow_safari_window": payload["follow_safari_window"] as? Bool ?? true,
             "follow_page_color": payload["follow_page_color"] as? Bool ?? true,
+            "agent_enabled": payload["agent_enabled"] as? Bool ?? false,
             "history_storage_path": payload["history_storage_path"] as? String ?? "",
             "history_storage_bookmark": payload["history_storage_bookmark"] as? String ?? "",
             "history_storage_uses_default": payload["history_storage_uses_default"] as? Bool ?? true,
