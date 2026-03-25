@@ -424,7 +424,7 @@ async function extractContextSnapshot() {
   let context;
   try {
     const { extractPageContext } = await sharedModulesPromise;
-    context = extractPageContext(window, document);
+    context = await extractPageContext(window, document);
   } catch {
     context = buildLightweightPageContext();
   }
@@ -563,6 +563,12 @@ function extractVisualStateLite() {
 function detectSiteLite(hostname) {
   if (hostname.includes("github.com")) return "github";
   if (hostname.includes("mail.google.com")) return "gmail";
+  if (hostname === "www.youtube.com" || hostname === "youtube.com" || hostname === "m.youtube.com" || hostname === "youtu.be") {
+    return "youtube";
+  }
+  if (hostname === "www.bilibili.com" || hostname === "bilibili.com" || hostname.endsWith(".bilibili.com") || hostname === "b23.tv") {
+    return "bilibili";
+  }
   if (hostname === "x.com" || hostname.endsWith(".x.com") || hostname.includes("twitter.com")) {
     return "x";
   }
@@ -575,6 +581,14 @@ function inferPageKindLite(hostname, pathname) {
   if (site === "x") {
     if (/\/status\/\d+/.test(pathname)) return "x_post";
     if (pathname === "/home") return "x_home";
+  }
+  if (site === "youtube") {
+    if (pathname === "/watch" || pathname.startsWith("/shorts/") || pathname.startsWith("/live/")) return "youtube_video";
+    return "youtube_page";
+  }
+  if (site === "bilibili") {
+    if (pathname.startsWith("/video/") || pathname.startsWith("/bangumi/play/")) return "bilibili_video";
+    return "bilibili_page";
   }
   if (site === "github") return "github_page";
   if (site === "gmail") return "gmail_page";

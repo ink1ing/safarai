@@ -6,13 +6,15 @@ import {
   extractPageContext,
 } from "../safarai/safarai Extension/Resources/shared/page-context.js";
 
-test("detectSite 能识别 GitHub 与 Gmail", () => {
+test("detectSite 能识别 GitHub、Gmail、YouTube 与 Bilibili", () => {
   assert.equal(detectSite("github.com"), "github");
   assert.equal(detectSite("mail.google.com"), "gmail");
+  assert.equal(detectSite("www.youtube.com"), "youtube");
+  assert.equal(detectSite("www.bilibili.com"), "bilibili");
   assert.equal(detectSite("example.com"), "unsupported");
 });
 
-test("GitHub PR 页面优先提取 markdown-body 并识别仓库", () => {
+test("GitHub PR 页面优先提取 markdown-body 并识别仓库", async () => {
   const markdownNode = createNode({
     textContent:
       "Pull request summary ".repeat(20),
@@ -66,7 +68,7 @@ test("GitHub PR 页面优先提取 markdown-body 并识别仓库", () => {
     },
   };
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
 
   assert.equal(result.site, "github");
   assert.equal(result.metadata.pageKind, "github_pull_request");
@@ -82,7 +84,7 @@ test("GitHub PR 页面优先提取 markdown-body 并识别仓库", () => {
   assert.equal(result.focusedInput.label, "Comment");
 });
 
-test("通用页面在无正文时返回空字符串与基础类型", () => {
+test("通用页面在无正文时返回空字符串与基础类型", async () => {
   const doc = createDocument({
     title: "Example",
     selectors: {
@@ -105,14 +107,14 @@ test("通用页面在无正文时返回空字符串与基础类型", () => {
     },
   };
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
   assert.equal(result.site, "unsupported");
   assert.equal(result.articleText, "");
   assert.equal(result.metadata.pageKind, "page");
   assert.equal(result.focusedInput, null);
 });
 
-test("通用页面会回退到结构化正文抽取", () => {
+test("通用页面会回退到结构化正文抽取", async () => {
   const paragraphOne = createNode({ textContent: "第一段内容，介绍页面的核心目标和背景信息。" });
   const paragraphTwo = createNode({ textContent: "第二段内容，补充了步骤、限制和预期结果，长度足够被提取。" });
   const heading = createNode({ textContent: "页面标题" });
@@ -144,14 +146,14 @@ test("通用页面会回退到结构化正文抽取", () => {
     },
   };
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
   assert.equal(result.metadata.domain, "docs.example.com");
   assert.equal(result.metadata.pageKind, "document");
   assert.match(result.articleText, /页面标题/);
   assert.match(result.articleText, /第二段内容/);
 });
 
-test("页面视觉信息会提取非透明背景、渐变和配色模式", () => {
+test("页面视觉信息会提取非透明背景、渐变和配色模式", async () => {
   const main = createNode({
     tagName: "MAIN",
     textContent: "Long-form content ".repeat(16),
@@ -206,13 +208,13 @@ test("页面视觉信息会提取非透明背景、渐变和配色模式", () =>
     pathname: "/visual",
   });
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
   assert.equal(result.metadata.pageBackgroundColor, "rgb(245, 247, 250)");
   assert.match(result.metadata.pageBackgroundImage, /linear-gradient/);
   assert.equal(result.metadata.pageColorScheme, "light");
 });
 
-test("Gmail 线程页会识别正文和可写回复框", () => {
+test("Gmail 线程页会识别正文和可写回复框", async () => {
   const replyBox = createNode({
     tagName: "DIV",
     attrs: {
@@ -248,7 +250,7 @@ test("Gmail 线程页会识别正文和可写回复框", () => {
     },
   };
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
   assert.equal(result.site, "gmail");
   assert.equal(result.metadata.pageKind, "gmail_thread");
   assert.equal(result.metadata.hasCommentEditor, true);
@@ -256,7 +258,7 @@ test("Gmail 线程页会识别正文和可写回复框", () => {
   assert.match(result.articleText, /^邮件正文/);
 });
 
-test("X 帖文页会识别帖子正文和回复框", () => {
+test("X 帖文页会识别帖子正文和回复框", async () => {
   const replyBox = createNode({
     tagName: "DIV",
     attrs: {
@@ -294,14 +296,150 @@ test("X 帖文页会识别帖子正文和回复框", () => {
     },
   };
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
   assert.equal(result.site, "x");
   assert.equal(result.metadata.pageKind, "x_post");
   assert.equal(result.metadata.hasCommentEditor, true);
   assert.match(result.articleText, /^This is a long X thread body/);
 });
 
-test("Yahoo Mail 会识别邮件正文和编辑器", () => {
+test("YouTube 视频页会提取字幕并构建视频上下文", async () => {
+  const description = createNode({
+    tagName: "DIV",
+    textContent: "这是一段关于字幕提取与视频总结的描述信息。",
+  });
+
+  const doc = createDocument({
+    title: "Build Better Browser Agents - YouTube",
+    selectors: {
+      "#description-inline-expander": description,
+      "#owner #channel-name a": createNode({ tagName: "A", textContent: "OpenAI Dev" }),
+      "meta[itemprop='duration']": createNode({ tagName: "META", attrs: { content: "PT5M12S" } }),
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.youtube.com/watch?v=abc123",
+    hostname: "www.youtube.com",
+    pathname: "/watch",
+    fetchMap: {
+      "https://www.youtube.com/watch?v=abc123": {
+        text: `
+          <script>
+            var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=abc123&amp;lang=en","languageCode":"en"}]}}};
+          </script>
+        `,
+      },
+      "https://www.youtube.com/api/timedtext?v=abc123&lang=en&fmt=json3": {
+        text: JSON.stringify({
+          events: [
+            { tStartMs: 0, segs: [{ utf8: "Hello and welcome to browser agents." }] },
+            { tStartMs: 12000, segs: [{ utf8: "We use captions to summarize videos safely." }] },
+          ],
+        }),
+      },
+    },
+  });
+
+  const result = await extractPageContext(win, doc);
+  assert.equal(result.site, "youtube");
+  assert.equal(result.metadata.pageKind, "youtube_video");
+  assert.equal(result.metadata.transcriptAvailable, "true");
+  assert.equal(result.metadata.transcriptLanguage, "en");
+  assert.match(result.structureSummary, /video_context: platform=youtube/);
+  assert.match(result.articleText, /video_transcript:/);
+  assert.match(result.articleText, /\[00:00\] Hello and welcome to browser agents\./);
+});
+
+test("YouTube 视频页会从内联脚本与 XML 字幕兜底提取逐字稿", async () => {
+  const scriptNode = createNode({
+    tagName: "SCRIPT",
+    textContent:
+      'var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=xml123&amp;lang=zh"}]}}};',
+  });
+  const description = createNode({
+    tagName: "DIV",
+    textContent: "这是一个只有页面内联播放器数据的视频页。",
+  });
+
+  const doc = createDocument({
+    title: "Inline Player Response - YouTube",
+    selectors: {
+      "#description-inline-expander": description,
+    },
+    selectorAll: {
+      script: [scriptNode],
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.youtube.com/watch?v=xml123",
+    hostname: "www.youtube.com",
+    pathname: "/watch",
+    fetchMap: {
+      "https://www.youtube.com/watch?v=xml123": {
+        text: "",
+      },
+      "https://www.youtube.com/api/timedtext?v=xml123&lang=zh&fmt=json3": {
+        text: `<transcript><text start="0.0">第一段</text><text start="6.0">第二段</text></transcript>`,
+      },
+    },
+  });
+
+  const result = await extractPageContext(win, doc);
+  assert.equal(result.metadata.transcriptAvailable, "true");
+  assert.equal(result.metadata.transcriptStatus, "ok_xml");
+  assert.match(result.articleText, /\[00:00\] 第一段/);
+  assert.match(result.articleText, /\[00:06\] 第二段/);
+});
+
+test("Bilibili 视频页会提取字幕并构建视频上下文", async () => {
+  const info = createNode({
+    tagName: "DIV",
+    textContent: "这是一个讲解如何为 Safari AI 浏览器补充视频总结能力的视频。",
+  });
+
+  const doc = createDocument({
+    title: "给 Safari AI 加视频总结功能_哔哩哔哩_bilibili",
+    selectors: {
+      "#viewbox_report": info,
+      ".up-name": createNode({ tagName: "A", textContent: "silas" }),
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.bilibili.com/video/BV1xx411c7mD",
+    hostname: "www.bilibili.com",
+    pathname: "/video/BV1xx411c7mD",
+    fetchMap: {
+      "https://www.bilibili.com/video/BV1xx411c7mD": {
+        text: `
+          <script>
+            window.__playinfo__ = {"data":{"subtitle":{"subtitles":[{"subtitle_url":"//i0.hdslb.com/bfs/subtitle/demo.json","lan":"zh-CN","lan_doc":"中文（自动生成）"}]}}};
+          </script>
+        `,
+      },
+      "https://i0.hdslb.com/bfs/subtitle/demo.json": {
+        json: {
+          body: [
+            { from: 0, content: "大家好，今天我们来看视频总结。" },
+            { from: 8.5, content: "核心思路是先提取字幕，再交给 LLM。" },
+          ],
+        },
+      },
+    },
+  });
+
+  const result = await extractPageContext(win, doc);
+  assert.equal(result.site, "bilibili");
+  assert.equal(result.metadata.pageKind, "bilibili_video");
+  assert.equal(result.metadata.transcriptAvailable, "true");
+  assert.match(result.structureSummary, /video_context: platform=bilibili/);
+  assert.match(result.articleText, /视频总结/);
+  assert.match(result.articleText, /\[00:08\] 核心思路是先提取字幕，再交给 LLM。/);
+});
+
+test("Yahoo Mail 会识别邮件正文和编辑器", async () => {
   const editor = createNode({
     tagName: "DIV",
     attrs: {
@@ -338,14 +476,14 @@ test("Yahoo Mail 会识别邮件正文和编辑器", () => {
     },
   };
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
   assert.equal(result.site, "yahoo_mail");
   assert.equal(result.metadata.pageKind, "yahoo_mail_thread");
   assert.equal(result.metadata.hasCommentEditor, true);
   assert.match(result.articleText, /^Yahoo mail content/);
 });
 
-test("DOM context v2 会跳过隐藏导航并产出结构与交互摘要", () => {
+test("DOM context v2 会跳过隐藏导航并产出结构与交互摘要", async () => {
   const titleNode = createNode({
     tagName: "H1",
     textContent: "Guide to shipping a Safari AI sidebar",
@@ -432,7 +570,7 @@ test("DOM context v2 会跳过隐藏导航并产出结构与交互摘要", () =>
     pathname: "/guide/sidebar",
   });
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
 
   assert.equal(result.metadata.contentStrategy, "generic_main");
   assert.equal(result.metadata.tableCount, "1");
@@ -459,7 +597,7 @@ test("DOM context v2 会跳过隐藏导航并产出结构与交互摘要", () =>
   });
 });
 
-test("interactiveSummary 会按页面位置稳定排序并过滤隐藏元素", () => {
+test("interactiveSummary 会按页面位置稳定排序并过滤隐藏元素", async () => {
   const hiddenButton = createNode({
     tagName: "BUTTON",
     textContent: "Hidden action",
@@ -501,7 +639,7 @@ test("interactiveSummary 会按页面位置稳定排序并过滤隐藏元素", (
     pathname: "/app",
   });
 
-  const result = extractPageContext(win, doc);
+  const result = await extractPageContext(win, doc);
   const lines = result.interactiveSummary.split("\n");
 
   assert.match(lines[0], /First visible/);
@@ -589,7 +727,7 @@ function createNode({
   return node;
 }
 
-function createWindow({ href, hostname, pathname, selection = "" }) {
+function createWindow({ href, hostname, pathname, selection = "", fetchMap = {} }) {
   return {
     location: { href, hostname, pathname },
     innerWidth: 1440,
@@ -609,6 +747,36 @@ function createWindow({ href, hostname, pathname, selection = "" }) {
         backgroundColor: "rgba(0, 0, 0, 0)",
         backgroundImage: "none",
         colorScheme: "normal",
+      };
+    },
+    async fetch(url) {
+      const entry = fetchMap[url];
+      if (!entry) {
+        return {
+          ok: false,
+          async text() {
+            return "";
+          },
+          async json() {
+            return {};
+          },
+        };
+      }
+
+      return {
+        ok: true,
+        async text() {
+          if (typeof entry.text === "string") {
+            return entry.text;
+          }
+          return JSON.stringify(entry.json ?? {});
+        },
+        async json() {
+          if (entry.json) {
+            return entry.json;
+          }
+          return JSON.parse(entry.text ?? "{}");
+        },
       };
     },
   };

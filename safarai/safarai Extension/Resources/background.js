@@ -1312,6 +1312,12 @@ function directPageContextProbe() {
   function detectDirectSite(currentHostname) {
     if (currentHostname.includes("github.com")) return "github";
     if (currentHostname.includes("mail.google.com")) return "gmail";
+    if (currentHostname === "www.youtube.com" || currentHostname === "youtube.com" || currentHostname === "m.youtube.com" || currentHostname === "youtu.be") {
+      return "youtube";
+    }
+    if (currentHostname === "www.bilibili.com" || currentHostname === "bilibili.com" || currentHostname.endsWith(".bilibili.com") || currentHostname === "b23.tv") {
+      return "bilibili";
+    }
     if (currentHostname === "x.com" || currentHostname.endsWith(".x.com") || currentHostname.includes("twitter.com")) {
       return "x";
     }
@@ -1324,6 +1330,12 @@ function directPageContextProbe() {
     if (site === "x") {
       if (/\/status\/\d+/.test(currentPathname)) return "x_post";
       if (currentPathname === "/home") return "x_home";
+    }
+    if (site === "youtube") {
+      if (currentPathname === "/watch" || currentPathname.startsWith("/shorts/") || currentPathname.startsWith("/live/")) return "youtube_video";
+    }
+    if (site === "bilibili") {
+      if (currentPathname.startsWith("/video/") || currentPathname.startsWith("/bangumi/play/")) return "bilibili_video";
     }
     return "page";
   }
@@ -1505,6 +1517,12 @@ function buildFallbackContext(tab, debug = {}) {
 function detectSiteFromHostname(hostname) {
   if (hostname.includes("github.com")) return "github";
   if (hostname.includes("mail.google.com")) return "gmail";
+  if (hostname === "www.youtube.com" || hostname === "youtube.com" || hostname === "m.youtube.com" || hostname === "youtu.be") {
+    return "youtube";
+  }
+  if (hostname === "www.bilibili.com" || hostname === "bilibili.com" || hostname.endsWith(".bilibili.com") || hostname === "b23.tv") {
+    return "bilibili";
+  }
   if (hostname === "x.com" || hostname.endsWith(".x.com") || hostname.includes("twitter.com")) {
     return "x";
   }

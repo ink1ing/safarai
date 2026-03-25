@@ -29,6 +29,11 @@ const systemPromptEditor = document.getElementById("sd-system-prompt-editor");
 const saveSystemPromptButton = document.getElementById("sd-save-system-prompt");
 const resetSystemPromptButton = document.getElementById("sd-reset-system-prompt");
 const contextPreviewURL = document.getElementById("context-preview-url");
+const contextDebugPageKind = document.getElementById("context-debug-page-kind");
+const contextDebugTranscript = document.getElementById("context-debug-transcript");
+const contextDebugSource = document.getElementById("context-debug-source");
+const contextDebugStatus = document.getElementById("context-debug-status");
+const contextDebugStrategy = document.getElementById("context-debug-strategy");
 const historyThreadList = document.getElementById("history-thread-list");
 const historyActionMenu = document.getElementById("history-action-menu");
 const newChatButton = document.getElementById("new-chat-button");
@@ -105,6 +110,8 @@ const I18N = {
     explain_page: "Explain Page",
     translate_page: "Translate Page",
     give_suggestions: "Give Suggestions",
+    summarize_video: "Summarize Video",
+    generate_timestamps: "Generate Timestamps",
     add_image: "Add Image",
     agent_mode: "Agent",
     drop_images: "Drop images here",
@@ -175,6 +182,8 @@ const I18N = {
     explain_page: "解释页面",
     translate_page: "翻译页面",
     give_suggestions: "给出建议",
+    summarize_video: "总结视频",
+    generate_timestamps: "生成时间戳",
     add_image: "添加图片",
     agent_mode: "智能体",
     drop_images: "拖放图片到这里",
@@ -1022,6 +1031,7 @@ function renderPanelState(payload) {
   } else {
     applyTranslations();
   }
+  syncSuggestionPills();
 
   questionEditor.disabled = !settings.isLoggedIn || isStreamingResponse;
   askPageButton.disabled = !settings.isLoggedIn;
@@ -1041,6 +1051,7 @@ function renderPanelState(payload) {
   }
   contextURL.textContent = context?.url || "";
   contextPreviewURL.textContent = context?.url || "";
+  renderContextDebug(context);
   const currentSelectionText = getCurrentSelectionText();
   contextSelectionText.textContent = currentSelectionText
     ? `"${currentSelectionText}"`
@@ -1052,8 +1063,93 @@ function renderPanelState(payload) {
   applyPageVisualState(context?.metadata || {});
 }
 
+function renderContextDebug(context) {
+  const metadata = context?.metadata || {};
+  if (contextDebugPageKind) {
+    contextDebugPageKind.textContent = metadata.pageKind || "n/a";
+  }
+  if (contextDebugTranscript) {
+    contextDebugTranscript.textContent =
+      metadata.transcriptAvailable === "true"
+        ? `yes${metadata.transcriptLanguage ? ` (${metadata.transcriptLanguage})` : ""}`
+        : "no";
+  }
+  if (contextDebugSource) {
+    contextDebugSource.textContent = metadata.transcriptSource || "n/a";
+  }
+  if (contextDebugStatus) {
+    contextDebugStatus.textContent = metadata.transcriptStatus || "n/a";
+  }
+  if (contextDebugStrategy) {
+    contextDebugStrategy.textContent = metadata.contentStrategy || "n/a";
+  }
+}
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme || "blue";
+}
+
+function isVideoContext(context = currentContext) {
+  const pageKind = String(context?.metadata?.pageKind || "");
+  return (
+    pageKind === "youtube_video" ||
+    pageKind === "bilibili_video" ||
+    pageKind === "x_video_post"
+  );
+}
+
+function buildVideoSummaryPrompt() {
+  return currentLanguage() === "zh"
+    ? "请基于当前视频页面可读取到的字幕、描述、标题和元数据，直接总结视频的核心内容、关键观点和结论；如果缺少字幕，请明确说明并仅基于可见页面信息总结。"
+    : "Summarize the current video using the transcript, description, title, and page metadata if available. If no transcript is available, say that clearly and summarize only from visible page information.";
+}
+
+function buildVideoTimestampPrompt() {
+  return currentLanguage() === "zh"
+    ? "请基于当前视频页面可读取到的字幕、描述、标题和元数据，生成按时间顺序排列的时间戳大纲；每一项都要包含时间点和对应内容摘要；如果缺少字幕，请明确说明并仅基于可见页面信息给出尽可能可靠的时间段划分。"
+    : "Generate timestamped chapter notes for the current video using the transcript, description, title, and page metadata if available. Include a timestamp and a short summary for each section. If no transcript is available, say that clearly and infer only what is reasonably supported by the page.";
+}
+
+function syncSuggestionPills() {
+  const suggestionButtons = document.querySelectorAll(".suggestion-pill");
+  const videoMode = isVideoContext();
+
+  if (videoMode) {
+    if (suggestionButtons[0]) {
+      suggestionButtons[0].textContent = t("summarize_video");
+      suggestionButtons[0].dataset.prompt = buildVideoSummaryPrompt();
+      suggestionButtons[0].classList.remove("is-hidden");
+    }
+    if (suggestionButtons[1]) {
+      suggestionButtons[1].textContent = t("generate_timestamps");
+      suggestionButtons[1].dataset.prompt = buildVideoTimestampPrompt();
+      suggestionButtons[1].classList.remove("is-hidden");
+    }
+    if (suggestionButtons[2]) {
+      suggestionButtons[2].dataset.prompt = "";
+      suggestionButtons[2].classList.add("is-hidden");
+    }
+    return;
+  }
+
+  if (suggestionButtons[0]) {
+    suggestionButtons[0].textContent = t("explain_page");
+    suggestionButtons[0].dataset.prompt =
+      currentLanguage() === "zh" ? "解释当前页面" : "Explain the current page";
+    suggestionButtons[0].classList.remove("is-hidden");
+  }
+  if (suggestionButtons[1]) {
+    suggestionButtons[1].textContent = t("translate_page");
+    suggestionButtons[1].dataset.prompt =
+      currentLanguage() === "zh" ? "翻译当前页面为中文" : "Translate the current page";
+    suggestionButtons[1].classList.remove("is-hidden");
+  }
+  if (suggestionButtons[2]) {
+    suggestionButtons[2].textContent = t("give_suggestions");
+    suggestionButtons[2].dataset.prompt =
+      currentLanguage() === "zh" ? "针对当前页面给出建议" : "Give suggestions for the current page";
+    suggestionButtons[2].classList.remove("is-hidden");
+  }
 }
 
 function applyPageVisualState(metadata) {
@@ -1282,22 +1378,7 @@ function applyTranslations() {
   newChatFooterButton.setAttribute("aria-label", t("new_chat"));
   newChatFooterButton.setAttribute("title", t("new_chat"));
 
-  const suggestionButtons = document.querySelectorAll(".suggestion-pill[data-prompt]");
-  if (suggestionButtons[0]) {
-    suggestionButtons[0].textContent = t("explain_page");
-    suggestionButtons[0].dataset.prompt =
-      currentLanguage() === "zh" ? "解释当前页面" : "Explain the current page";
-  }
-  if (suggestionButtons[1]) {
-    suggestionButtons[1].textContent = t("translate_page");
-    suggestionButtons[1].dataset.prompt =
-      currentLanguage() === "zh" ? "翻译当前页面为中文" : "Translate the current page";
-  }
-  if (suggestionButtons[2]) {
-    suggestionButtons[2].textContent = t("give_suggestions");
-    suggestionButtons[2].dataset.prompt =
-      currentLanguage() === "zh" ? "针对当前页面给出建议" : "Give suggestions for the current page";
-  }
+  syncSuggestionPills();
 }
 
 function syncAgentModeButton() {
