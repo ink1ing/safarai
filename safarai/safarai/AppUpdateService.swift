@@ -95,7 +95,7 @@ final class AppUpdateService {
             throw AppUpdateError.invalidResponse
         }
 
-        guard let release = releases.first(where: { !$0.draft }) else {
+        guard let release = releases.first(where: { !$0.draft && !$0.prerelease }) else {
             throw AppUpdateError.noReleaseFound
         }
 
@@ -153,8 +153,14 @@ final class AppUpdateService {
     }
 
     private func preferredInstallAsset(from assets: [GitHubReleaseAsset]) -> GitHubReleaseAsset? {
-        if let dmg = assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) {
+        if let dmg = assets.first(where: {
+            let name = $0.name.lowercased()
+            return name.hasPrefix("safarai-v") && name.hasSuffix("-macos.dmg")
+        }) {
             return dmg
+        }
+        if let fallbackDMG = assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) {
+            return fallbackDMG
         }
         return assets.first(where: { $0.name.lowercased().hasSuffix(".zip") })
     }
