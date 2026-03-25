@@ -27,6 +27,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private var nextSafariToolWindowID = 1
     private var nextSafariToolTabID = 1
     private var copilotLoginState: [String: String]?
+    private var appUpdateState: AppUpdateResult?
 
     private final class SafariCallbackBox<T> {
         private let lock = NSLock()
@@ -254,6 +255,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             } catch {
                 pushError(error.localizedDescription)
             }
+        case "check-for-updates":
+            checkForUpdates()
+        case "install-latest-update":
+            installLatestUpdate()
         case "change-history-storage-location":
             changeHistoryStorageLocation()
         case "reset-history-storage-location":
@@ -602,6 +607,54 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 pushPanelState(status: AppText.localized(en: "Zed models refreshed: \(models.count).", zh: "Zed 模型列表已刷新，共 \(models.count) 个。"))
             } catch {
                 pushError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func checkForUpdates() {
+        pushPanelState(status: AppText.localized(en: "Checking for updates…", zh: "正在检查更新…"))
+        Task {
+            do {
+                let result = try await AppUpdateService.shared.checkForUpdates()
+                await MainActor.run {
+                    self.appUpdateState = result
+                    self.pushPanelState(status: result.statusText)
+                }
+            } catch {
+                await MainActor.run {
+                    self.pushError(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func installLatestUpdate() {
+        let currentState = appUpdateState
+        guard let state = currentState else {
+            pushPanelState(status: AppText.localized(en: "Check for updates first.", zh: "请先检查更新。"))
+            return
+        }
+        guard state.isUpdateAvailable else {
+            pushPanelState(status: AppText.localized(en: "You already have the latest version.", zh: "当前已经是最新版本。"))
+            return
+        }
+
+        pushPanelState(status: AppText.localized(en: "Downloading update…", zh: "正在下载更新…"))
+        Task {
+            do {
+                let localURL = try await AppUpdateService.shared.installUpdate(using: state)
+                await MainActor.run {
+                    self.pushPanelState(
+                        status: AppText.localized(
+                            en: "Update package downloaded and opened: \(localURL.lastPathComponent)",
+                            zh: "更新包已下载并打开：\(localURL.lastPathComponent)"
+                        )
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self.pushError(error.localizedDescription)
+                }
             }
         }
     }
@@ -1858,6 +1911,9 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             snapshotDebug: snapshot?.context?.debugSelection,
             selectionIntent: nil
         )
+        let currentVersionInfo = AppUpdateService.shared.currentVersionInfo()
+        let updateStatusText = appUpdateState?.statusText ?? AppText.localized(en: "No update check yet.", zh: "尚未检查更新。")
+        let updateLatestLabel = appUpdateState?.latestTag ?? AppText.localized(en: "Unknown", zh: "未知")
 
         if isLoggedIn, activeProvider != ProviderSettingsStore.loadActiveProvider() {
             try? ProviderSettingsStore.saveActiveProvider(activeProvider)
@@ -1909,6 +1965,11 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             "followSafariWindow": loadFollowSafariWindow(),
             "followPageColor": loadFollowPageColor(),
             "agentEnabled": loadAgentEnabled(),
+            "currentVersion": "\(currentVersionInfo.version) (\(currentVersionInfo.build))",
+            "updateLatestVersion": updateLatestLabel,
+            "updateStatus": updateStatusText,
+            "updateAvailable": appUpdateState?.isUpdateAvailable ?? false,
+            "updateAssetName": jsonValue(appUpdateState?.assetName),
             "historyStoragePath": historyStorageState.displayPath,
             "historyStorageStatus": historyStorageState.status,
             "historyStorageUsesDefault": historyStorageState.usesDefault,

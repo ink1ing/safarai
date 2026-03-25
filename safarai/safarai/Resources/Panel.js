@@ -90,6 +90,11 @@ const I18N = {
     export: "Export",
     current_page: "Current Page",
     agent_settings: "Agent",
+    updates: "Updates",
+    current_version: "Current Version",
+    latest_version: "Latest",
+    check_updates: "Check Updates",
+    install_latest: "Install Latest",
     save: "Save",
     remember: "Remember",
     snap_left: "Snap Left",
@@ -155,6 +160,11 @@ const I18N = {
     export: "导出",
     current_page: "当前页面",
     agent_settings: "Agent",
+    updates: "更新",
+    current_version: "当前版本",
+    latest_version: "最新版本",
+    check_updates: "检查更新",
+    install_latest: "安装最新版",
     save: "保存",
     remember: "记忆位置",
     snap_left: "左吸附",
@@ -801,6 +811,12 @@ document
     agentEnabled: !currentDrawerState.agentEnabled,
   }));
 document
+  .getElementById("sd-check-updates")
+  .addEventListener("click", () => sdPost("check-for-updates"));
+document
+  .getElementById("sd-install-update")
+  .addEventListener("click", () => sdPost("install-latest-update"));
+document
   .getElementById("sd-follow-safari-window")
   .addEventListener("click", () => sdToggleFollowSafariWindow());
 document
@@ -838,6 +854,11 @@ function renderSettingsDrawerState(payload) {
     historyStorageStatus: payload.historyStorageStatus || "",
     historyStorageUsesDefault: payload.historyStorageUsesDefault !== false,
     agentEnabled: payload.agentEnabled === true,
+    currentVersion: payload.currentVersion || "",
+    updateLatestVersion: payload.updateLatestVersion || "",
+    updateStatus: payload.updateStatus || "",
+    updateAvailable: payload.updateAvailable === true,
+    updateAssetName: payload.updateAssetName || "",
     customSystemPrompt: payload.customSystemPrompt || "",
     copilotLoginStatus: payload.copilotLoginStatus || "",
     copilotUserCode: payload.copilotUserCode || "",
@@ -904,6 +925,14 @@ function renderSettingsDrawerState(payload) {
     currentDrawerState.historyStoragePath || "默认位置";
   el("sd-history-storage-status").textContent =
     currentDrawerState.historyStorageStatus || "默认位置";
+  el("sd-current-version").textContent = currentDrawerState.currentVersion
+    ? `${t("current_version")}: ${currentDrawerState.currentVersion}`
+    : t("current_version");
+  el("sd-latest-version").textContent = currentDrawerState.updateLatestVersion
+    ? `${t("latest_version")}: ${currentDrawerState.updateLatestVersion}`
+    : `${t("latest_version")}: -`;
+  el("sd-update-status").textContent = currentDrawerState.updateStatus || "";
+  el("sd-install-update").disabled = !currentDrawerState.updateAvailable;
   el("sd-reset-history-storage").disabled =
     currentDrawerState.historyStorageUsesDefault === true;
 
@@ -1192,6 +1221,7 @@ function applyTranslations() {
   document.getElementById("settings-label-history").textContent = t("chat_history");
   document.getElementById("settings-label-display").textContent = t("display");
   document.getElementById("settings-label-agent").textContent = t("agent_settings");
+  document.getElementById("settings-label-updates").textContent = t("updates");
   document.getElementById("settings-label-system-prompt").textContent = t("system_prompt");
   document.getElementById("settings-label-placement").textContent = t("placement");
   document.getElementById("settings-label-follow-safari").textContent = t("follow_safari");
@@ -1216,6 +1246,8 @@ function applyTranslations() {
   document.getElementById("sd-export-history").textContent = t("export");
   document.getElementById("sd-toggle-page-info").textContent = t("current_page");
   document.getElementById("sd-toggle-agent").textContent = t("enable_agent");
+  document.getElementById("sd-check-updates").textContent = t("check_updates");
+  document.getElementById("sd-install-update").textContent = t("install_latest");
   document.getElementById("sd-save-system-prompt").textContent = t("save");
   document.getElementById("sd-reset-system-prompt").textContent = t("reset_default");
   document.getElementById("sd-placement-remember").textContent = t("remember");
