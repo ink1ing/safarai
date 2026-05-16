@@ -1,4 +1,12 @@
 import { describeWriteTarget, isWritableElement, resolveWritableTarget } from "./write-target.js";
+import {
+  applyResolvedVideoContext,
+  buildVideoArticleText as buildUnifiedVideoArticleText,
+  detectVideoContext,
+  resolveVideoContext as resolveUnifiedVideoContext,
+} from "./video-context.js";
+
+export { applyResolvedVideoContext, resolveUnifiedVideoContext as resolveVideoContext };
 
 const MAX_ARTICLE_TEXT_LENGTH = 12_000;
 const MAX_VIDEO_TRANSCRIPT_LENGTH = 16_000;
@@ -77,7 +85,7 @@ export async function extractPageContext(win, doc) {
     .slice(0, MAX_INTERACTIVE_TARGETS)
     .map(serializeInteractiveTarget);
 
-  const context = {
+  let context = {
     site,
     url: win.location.href,
     title: doc.title || "Untitled",
@@ -103,6 +111,23 @@ export async function extractPageContext(win, doc) {
       hasShadowHosts: pageAnalysis.hasShadowHosts ? "true" : "false",
     },
   };
+
+  const detectedVideoContext = detectVideoContext(win, doc, {
+    site,
+    pageKind: metadata.pageKind,
+    href: win.location.href,
+    pathname: win.location.pathname,
+    hostname: win.location.hostname,
+  });
+  if (detectedVideoContext) {
+    context = applyResolvedVideoContext(
+      {
+        ...context,
+        articleText: buildUnifiedVideoArticleText(detectedVideoContext, articleExtraction.text, win.location.href),
+      },
+      detectedVideoContext
+    );
+  }
 
   Object.defineProperty(context, "__interactiveTargetIndex", {
     value: pageAnalysis.interactiveIndex,
@@ -358,14 +383,6 @@ const youtubeAdapter = {
     };
   },
 
-  async enrichContext(context, win, doc) {
-    if (context.metadata.pageKind !== "youtube_video") {
-      return context;
-    }
-
-    const details = await extractYouTubeVideoDetails(win, doc);
-    return applyVideoDetails(context, details, "youtube");
-  },
 };
 
 const bilibiliAdapter = {
@@ -407,14 +424,6 @@ const bilibiliAdapter = {
     };
   },
 
-  async enrichContext(context, win, doc) {
-    if (context.metadata.pageKind !== "bilibili_video") {
-      return context;
-    }
-
-    const details = await extractBilibiliVideoDetails(win, doc);
-    return applyVideoDetails(context, details, "bilibili");
-  },
 };
 
 const yahooMailAdapter = {
@@ -1237,6 +1246,7 @@ async function extractYouTubeVideoDetails(win, doc) {
   const author = firstMeaningfulText(doc, ["#owner #channel-name a", "ytd-channel-name a", "meta[itemprop='author']"]);
   const description = firstMeaningfulText(doc, ["#description-inline-expander", "#description", "meta[name='description']"]);
   const duration = normalizeWhitespace(firstMeaningfulText(doc, ["meta[itemprop='duration']"]));
+  const domTranscriptResult = await ensureYouTubeTranscriptFromDOM(win, doc);
   const html = await fetchDocumentHTML(win);
   const playerResponse =
     extractYouTubePlayerResponse(doc, html) ||
@@ -1244,9 +1254,11 @@ async function extractYouTubeVideoDetails(win, doc) {
   const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
   const preferredTrack = chooseCaptionTrack(captionTracks);
   const transcriptURL = preferredTrack?.baseUrl ? decodeHtmlEntities(String(preferredTrack.baseUrl)) : "";
-  const transcriptResult = transcriptURL
-    ? await fetchYouTubeTranscript(win, transcriptURL)
-    : { text: "", status: captionTracks.length ? "caption_track_missing_url" : "no_caption_tracks" };
+  const transcriptResult = domTranscriptResult.text
+    ? domTranscriptResult
+    : transcriptURL
+      ? await fetchYouTubeTranscript(win, transcriptURL)
+      : { text: "", status: captionTracks.length ? "caption_track_missing_url" : "no_caption_tracks" };
 
   return {
     title,
@@ -1255,10 +1267,152 @@ async function extractYouTubeVideoDetails(win, doc) {
     duration,
     transcript: transcriptResult.text,
     transcriptLanguage: String(preferredTrack?.languageCode ?? ""),
-    transcriptSource: transcriptResult.text ? "youtube_captions" : "",
+    transcriptSource: transcriptResult.text
+      ? (transcriptResult.status === "ok_dom" || transcriptResult.status === "ok_dom_auto"
+        ? "youtube_transcript_dom"
+        : "youtube_captions")
+      : "",
     transcriptStatus: transcriptResult.status,
     transcriptTrackCount: captionTracks.length,
   };
+}
+
+async function ensureYouTubeTranscriptFromDOM(win, doc) {
+  const existing = readVisibleYouTubeTranscriptFromDOM(doc);
+  if (existing.text) {
+    return existing;
+  }
+
+  const clickedTranscript = clickYouTubeTranscriptButton(doc);
+  if (!clickedTranscript) {
+    clickYouTubeExpandButton(doc);
+    await waitForPage(win, 260);
+    clickYouTubeTranscriptButton(doc);
+  }
+
+  for (const delay of [180, 360, 720, 1200]) {
+    await waitForPage(win, delay);
+    const next = readVisibleYouTubeTranscriptFromDOM(doc);
+    if (next.text) {
+      return {
+        ...next,
+        status: "ok_dom_auto",
+      };
+    }
+  }
+
+  return { text: "", status: "" };
+}
+
+function readVisibleYouTubeTranscriptFromDOM(doc) {
+  const segmentNodes = Array.from(
+    doc.querySelectorAll?.(
+      [
+        "ytd-transcript-segment-renderer",
+        "ytd-transcript-search-panel-renderer ytd-transcript-segment-renderer",
+        "ytd-transcript-segment-list-renderer ytd-transcript-segment-renderer",
+      ].join(", ")
+    ) || []
+  );
+
+  const lines = segmentNodes
+    .map((node) => {
+      const timestamp = normalizeWhitespace(
+        readNodeText(node.querySelector?.(".segment-timestamp")) ||
+        readNodeText(node.querySelector?.("[class*='timestamp']"))
+      );
+      let text = normalizeWhitespace(
+        readNodeText(node.querySelector?.(".segment-text")) ||
+        readNodeText(node.querySelector?.("[class*='segment-text']")) ||
+        readNodeText(node)
+      );
+      if (!text) {
+        return "";
+      }
+      if (timestamp && text.startsWith(timestamp)) {
+        text = normalizeWhitespace(text.slice(timestamp.length));
+      }
+      return timestamp ? `[${timestamp}] ${text}` : text;
+    })
+    .filter(Boolean);
+
+  return {
+    text: trimToLength(lines.join("\n"), MAX_VIDEO_TRANSCRIPT_LENGTH),
+    status: lines.length ? "ok_dom" : "",
+  };
+}
+
+function clickYouTubeTranscriptButton(doc) {
+  const matcher = /(show transcript|open transcript|transcript|显示文字记录|显示转录|转录稿|文字记录)/i;
+  for (const candidate of queryYouTubeActionCandidates(doc)) {
+    const text = normalizeWhitespace(readNodeText(candidate));
+    const label = normalizeWhitespace(readAttribute(candidate, "aria-label") || readAttribute(candidate, "title"));
+    if (matcher.test(text) || matcher.test(label)) {
+      candidate.click?.();
+      return true;
+    }
+  }
+  return false;
+}
+
+function clickYouTubeExpandButton(doc) {
+  const matcher = /(^more$|show more|expand|更多|展开|显示更多)/i;
+  for (const candidate of queryYouTubeActionCandidates(doc)) {
+    const text = normalizeWhitespace(readNodeText(candidate));
+    const label = normalizeWhitespace(readAttribute(candidate, "aria-label") || readAttribute(candidate, "title"));
+    if (matcher.test(text) || matcher.test(label)) {
+      candidate.click?.();
+      return true;
+    }
+  }
+  return false;
+}
+
+function queryYouTubeActionCandidates(doc) {
+  const roots = [
+    doc.querySelector?.("ytd-watch-metadata"),
+    doc.querySelector?.("#description"),
+    doc.querySelector?.("#description-inline-expander"),
+    doc.querySelector?.("ytd-text-inline-expander"),
+    doc.body,
+  ].filter(Boolean);
+
+  const seen = new Set();
+  const candidates = [];
+  for (const root of roots) {
+    const nodes = root.querySelectorAll?.("*") || [];
+    for (const node of nodes) {
+      const clickable = resolveYouTubeClickable(node);
+      if (!clickable || seen.has(clickable)) {
+        continue;
+      }
+      seen.add(clickable);
+      candidates.push(clickable);
+    }
+  }
+  return candidates;
+}
+
+function resolveYouTubeClickable(node) {
+  return node?.closest?.(
+    [
+      "button",
+      "[role='button']",
+      "tp-yt-paper-button",
+      "yt-button-shape",
+      "yt-button-shape button",
+      "ytd-button-renderer",
+      "ytd-menu-service-item-renderer",
+      "tp-yt-paper-item",
+      "yt-formatted-string",
+    ].join(", ")
+  ) || null;
+}
+
+function waitForPage(win, delayMs) {
+  return new Promise((resolve) => {
+    win.setTimeout(resolve, delayMs);
+  });
 }
 
 async function extractBilibiliVideoDetails(win, doc) {

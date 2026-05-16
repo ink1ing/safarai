@@ -17,7 +17,30 @@ struct PanelConversationMessage: Codable {
     var attachments: [PanelAttachment]? = nil
 }
 
-struct PanelContextSnapshot: Codable {
+struct PanelVideoContextSnapshot: Codable, Equatable {
+    var platform: String
+    var pageKind: String
+    var mediaId: String
+    var canonicalUrl: String
+    var title: String
+    var author: String
+    var duration: String
+    var description: String
+    var postText: String
+    var transcriptText: String
+    var transcriptLanguage: String
+    var transcriptAvailability: String
+    var transcriptReason: String
+    var transcriptSource: String
+    var summaryInputSource: String?
+    var summaryText: String?
+    var fallbackDetail: String?
+    var summaryReady: Bool?
+    var summaryMode: String
+    var detectedAt: String
+}
+
+struct PanelContextSnapshot: Codable, Equatable {
     var site: String
     var url: String
     var title: String
@@ -26,6 +49,7 @@ struct PanelContextSnapshot: Codable {
     var structureSummary: String?
     var interactiveSummary: String?
     var metadata: [String: String]
+    var videoContext: PanelVideoContextSnapshot?
     var debugSelection: [String: String]?
     var visualSummary: String?
 }

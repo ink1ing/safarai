@@ -9,12 +9,11 @@ enum SafariContextRefresher {
 
     static func loadFrontmostPage() async -> Snapshot? {
         await withCheckedContinuation { continuation in
-            SFSafariApplication.getAllWindows { windows in
-                guard let window = windows.first else {
+            SFSafariApplication.getActiveWindow { window in
+                guard let window else {
                     continuation.resume(returning: nil)
                     return
                 }
-
                 window.getActiveTab { tab in
                     guard let tab else {
                         continuation.resume(returning: nil)

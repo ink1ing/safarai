@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applyResolvedVideoContext,
   detectSite,
   extractPageContext,
+  resolveVideoContext,
 } from "../safarai/safarai Extension/Resources/shared/page-context.js";
 
 test("detectSite 能识别 GitHub、Gmail、YouTube 与 Bilibili", () => {
@@ -303,7 +305,7 @@ test("X 帖文页会识别帖子正文和回复框", async () => {
   assert.match(result.articleText, /^This is a long X thread body/);
 });
 
-test("YouTube 视频页会提取字幕并构建视频上下文", async () => {
+test("YouTube 视频页会检测并在 resolve 阶段提取字幕", async () => {
   const description = createNode({
     tagName: "DIV",
     textContent: "这是一段关于字幕提取与视频总结的描述信息。",
@@ -341,11 +343,20 @@ test("YouTube 视频页会提取字幕并构建视频上下文", async () => {
     },
   });
 
-  const result = await extractPageContext(win, doc);
-  assert.equal(result.site, "youtube");
-  assert.equal(result.metadata.pageKind, "youtube_video");
+  const detected = await extractPageContext(win, doc);
+  assert.equal(detected.site, "youtube");
+  assert.equal(detected.metadata.pageKind, "youtube_video");
+  assert.equal(detected.metadata.contentStrategy, "youtube_pending");
+  assert.equal(detected.videoContext.platform, "youtube");
+  assert.equal(detected.videoContext.transcriptAvailability, "partial");
+
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
   assert.equal(result.metadata.transcriptAvailable, "true");
-  assert.equal(result.metadata.transcriptLanguage, "en");
+  assert.equal(result.metadata.contentStrategy, "youtube_transcript");
+  assert.equal(result.videoContext.transcriptLanguage, "en");
+  assert.equal(result.videoContext.summaryInputSource, "transcript");
+  assert.equal(result.videoContext.summaryReady, true);
   assert.match(result.structureSummary, /video_context: platform=youtube/);
   assert.match(result.articleText, /video_transcript:/);
   assert.match(result.articleText, /\[00:00\] Hello and welcome to browser agents\./);
@@ -386,14 +397,17 @@ test("YouTube 视频页会从内联脚本与 XML 字幕兜底提取逐字稿", a
     },
   });
 
-  const result = await extractPageContext(win, doc);
+  const detected = await extractPageContext(win, doc);
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
   assert.equal(result.metadata.transcriptAvailable, "true");
-  assert.equal(result.metadata.transcriptStatus, "ok_xml");
+  assert.equal(result.metadata.transcriptStatus, "ok");
+  assert.equal(result.videoContext.summaryInputSource, "transcript");
   assert.match(result.articleText, /\[00:00\] 第一段/);
   assert.match(result.articleText, /\[00:06\] 第二段/);
 });
 
-test("Bilibili 视频页会提取字幕并构建视频上下文", async () => {
+test("Bilibili 视频页会检测并在 resolve 阶段提取字幕", async () => {
   const info = createNode({
     tagName: "DIV",
     textContent: "这是一个讲解如何为 Safari AI 浏览器补充视频总结能力的视频。",
@@ -430,13 +444,395 @@ test("Bilibili 视频页会提取字幕并构建视频上下文", async () => {
     },
   });
 
-  const result = await extractPageContext(win, doc);
-  assert.equal(result.site, "bilibili");
-  assert.equal(result.metadata.pageKind, "bilibili_video");
+  const detected = await extractPageContext(win, doc);
+  assert.equal(detected.site, "bilibili");
+  assert.equal(detected.metadata.pageKind, "bilibili_video");
+  assert.equal(detected.videoContext.platform, "bilibili");
+  assert.equal(detected.videoContext.transcriptAvailability, "partial");
+
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
   assert.equal(result.metadata.transcriptAvailable, "true");
+  assert.equal(result.videoContext.summaryInputSource, "transcript");
   assert.match(result.structureSummary, /video_context: platform=bilibili/);
   assert.match(result.articleText, /视频总结/);
   assert.match(result.articleText, /\[00:08\] 核心思路是先提取字幕，再交给 LLM。/);
+});
+
+test("Bilibili 无字幕但有官方总结时会走 official_summary fallback", async () => {
+  const info = createNode({
+    tagName: "DIV",
+    textContent: "页面可见描述信息",
+  });
+
+  const doc = createDocument({
+    title: "Bilibili Official Summary",
+    selectors: {
+      "#viewbox_report": info,
+      ".video-desc-container": info,
+      ".up-name": createNode({ tagName: "A", textContent: "up 主" }),
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.bilibili.com/video/BVofficial123",
+    hostname: "www.bilibili.com",
+    pathname: "/video/BVofficial123",
+    fetchMap: {
+      "https://www.bilibili.com/video/BVofficial123": {
+        text: `<script>window.__INITIAL_STATE__={"videoData":{"bvid":"BVofficial123","cid":456}}</script>`,
+      },
+      "https://api.bilibili.com/x/web-interface/view?bvid=BVofficial123": {
+        json: {
+          data: {
+            bvid: "BVofficial123",
+            cid: 456,
+            title: "官方总结视频",
+            desc: "页面描述",
+            owner: { name: "up 主" },
+            duration: 600,
+          },
+        },
+      },
+      "https://api.bilibili.com/x/player/v2?bvid=BVofficial123&cid=456": {
+        json: {
+          data: {
+            subtitle: { subtitles: [] },
+            view_points: [],
+          },
+        },
+      },
+      "https://api.bilibili.com/x/web-interface/view/conclusion/get?bvid=BVofficial123&cid=456": {
+        json: {
+          code: 0,
+          data: {
+            model_result: {
+              summary: "这是官方总结。",
+              outline: [
+                {
+                  title: "第一部分",
+                  part_outline: [
+                    { timestamp: 0, content: "开场介绍" },
+                    { timestamp: 120, content: "核心观点" },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const detected = await extractPageContext(win, doc);
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
+  assert.equal(result.videoContext.transcriptAvailability, "unavailable");
+  assert.equal(result.videoContext.summaryInputSource, "official_summary");
+  assert.equal(result.videoContext.summaryReady, true);
+  assert.equal(result.metadata.contentStrategy, "bilibili_official_summary");
+  assert.match(result.articleText, /video_official_summary:/);
+  assert.match(result.articleText, /这是官方总结。/);
+});
+
+test("Bilibili 无字幕且官方总结被拒绝时会回退到 page_text", async () => {
+  const info = createNode({
+    tagName: "DIV",
+    textContent: "这是页面里的可见描述和正文线索。",
+  });
+
+  const doc = createDocument({
+    title: "Bilibili Page Text Fallback",
+    selectors: {
+      "#viewbox_report": info,
+      ".video-desc-container": info,
+      ".up-name": createNode({ tagName: "A", textContent: "up 主" }),
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.bilibili.com/video/BVfallback123",
+    hostname: "www.bilibili.com",
+    pathname: "/video/BVfallback123",
+    fetchMap: {
+      "https://www.bilibili.com/video/BVfallback123": {
+        text: `<script>window.__INITIAL_STATE__={"videoData":{"bvid":"BVfallback123","cid":789}}</script>`,
+      },
+      "https://api.bilibili.com/x/web-interface/view?bvid=BVfallback123": {
+        json: {
+          data: {
+            bvid: "BVfallback123",
+            cid: 789,
+            title: "页面文本回退视频",
+            desc: "描述文本",
+            owner: { name: "up 主" },
+            duration: 321,
+          },
+        },
+      },
+      "https://api.bilibili.com/x/player/v2?bvid=BVfallback123&cid=789": {
+        json: {
+          data: {
+            subtitle: { subtitles: [] },
+            view_points: [],
+          },
+        },
+      },
+      "https://api.bilibili.com/x/web-interface/view/conclusion/get?bvid=BVfallback123&cid=789": {
+        json: {
+          code: -403,
+          message: "访问权限不足",
+        },
+      },
+    },
+  });
+
+  const detected = await extractPageContext(win, doc);
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
+  assert.equal(result.videoContext.summaryInputSource, "page_text");
+  assert.equal(result.videoContext.summaryReady, true);
+  assert.match(result.videoContext.fallbackDetail, /page_text/);
+  assert.match(result.articleText, /video_page_text:/);
+});
+
+test("Bilibili 无字幕、无总结、无章节时会降级为 metadata_only", async () => {
+  const doc = createDocument({
+    title: "Metadata Only",
+    selectors: {
+      "h1.video-title": createNode({ tagName: "H1", textContent: "Metadata Only Video" }),
+      ".up-name": createNode({ tagName: "A", textContent: "up 主" }),
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.bilibili.com/video/BVmeta123",
+    hostname: "www.bilibili.com",
+    pathname: "/video/BVmeta123",
+    fetchMap: {
+      "https://www.bilibili.com/video/BVmeta123": {
+        text: `<script>window.__INITIAL_STATE__={"videoData":{"bvid":"BVmeta123","cid":1001}}</script>`,
+      },
+      "https://api.bilibili.com/x/web-interface/view?bvid=BVmeta123": {
+        json: {
+          data: {
+            bvid: "BVmeta123",
+            cid: 1001,
+            title: "Metadata Only Video",
+            desc: "",
+            owner: { name: "up 主" },
+            duration: 99,
+          },
+        },
+      },
+      "https://api.bilibili.com/x/player/v2?bvid=BVmeta123&cid=1001": {
+        json: {
+          data: {
+            subtitle: { subtitles: [] },
+            view_points: [],
+          },
+        },
+      },
+      "https://api.bilibili.com/x/web-interface/view/conclusion/get?bvid=BVmeta123&cid=1001": {
+        json: {
+          code: -403,
+          message: "访问权限不足",
+        },
+      },
+    },
+  });
+
+  const detected = await extractPageContext(win, doc);
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  assert.equal(resolvedVideoContext.summaryInputSource, "metadata_only");
+  assert.equal(resolvedVideoContext.summaryReady, true);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
+  assert.equal(result.metadata.contentStrategy, "bilibili_metadata_only");
+  assert.match(result.articleText, /video_summary:/);
+});
+
+test("X 视频帖存在字幕 track 时会优先提取 transcript", async () => {
+  const trackNode = createNode({
+    tagName: "TRACK",
+    attrs: {
+      kind: "captions",
+      src: "https://video.twimg.com/subtitles/demo.vtt",
+    },
+  });
+  const videoNode = createNode({
+    tagName: "VIDEO",
+  });
+  const article = createNode({
+    tagName: "ARTICLE",
+    children: [
+      createNode({
+        tagName: "DIV",
+        attrs: { "data-testid": "tweetText" },
+        textContent: "Video post body with captions.",
+      }),
+    ],
+  });
+
+  const doc = createDocument({
+    title: "Captioned video post / X",
+    body: createNode({
+      tagName: "BODY",
+      children: [article, videoNode, trackNode],
+    }),
+    selectors: {
+      article,
+      "video track[kind='captions'], video track[kind='subtitles']": trackNode,
+      "[data-testid='videoPlayer'], video, [aria-label*='video'], [data-testid='card.wrapper']": videoNode,
+      video: videoNode,
+      body: null,
+    },
+  });
+
+  const win = createWindow({
+    href: "https://x.com/demo/status/5566778899",
+    hostname: "x.com",
+    pathname: "/demo/status/5566778899",
+    fetchMap: {
+      "https://video.twimg.com/subtitles/demo.vtt": {
+        text: `WEBVTT
+
+00:00:00.000 --> 00:00:02.000
+First caption line
+
+00:00:02.000 --> 00:00:04.000
+Second caption line`,
+      },
+    },
+  });
+
+  const detected = await extractPageContext(win, doc);
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
+  assert.equal(result.videoContext.transcriptAvailability, "available");
+  assert.equal(result.videoContext.transcriptSource, "track");
+  assert.equal(result.videoContext.summaryInputSource, "transcript");
+  assert.equal(result.metadata.contentStrategy, "x_transcript");
+  assert.match(result.articleText, /video_transcript:/);
+});
+
+test("YouTube 无字幕、无章节、无描述时会降级为 metadata_only", async () => {
+  const doc = createDocument({
+    title: "Metadata Only - YouTube",
+    selectors: {
+      "#owner #channel-name a": createNode({ tagName: "A", textContent: "OpenAI Dev" }),
+    },
+    selectorAll: {
+      "ytd-macro-markers-list-item-renderer": [],
+      "ytd-engagement-panel-section-list-renderer [data-testid='chapter']": [],
+      "a[href*='t=']": [],
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.youtube.com/watch?v=metaonly1",
+    hostname: "www.youtube.com",
+    pathname: "/watch",
+    fetchMap: {
+      "https://www.youtube.com/watch?v=metaonly1": {
+        text: `<script>var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[]}}};</script>`,
+      },
+    },
+  });
+
+  const detected = await extractPageContext(win, doc);
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
+  assert.equal(result.videoContext.summaryInputSource, "metadata_only");
+  assert.equal(result.videoContext.summaryReady, true);
+  assert.equal(result.metadata.contentStrategy, "youtube_metadata_only");
+  assert.match(result.articleText, /video_summary:/);
+});
+
+test("X 视频帖会在 resolve 阶段回退到 page_text summary", async () => {
+  const article = createNode({
+    tagName: "ARTICLE",
+    textContent: "Video post body with visible context and no public captions.",
+  });
+  const videoPlayer = createNode({
+    tagName: "DIV",
+    attrs: {
+      "data-testid": "videoPlayer",
+    },
+  });
+
+  const doc = createDocument({
+    title: "Video post / X",
+    body: createNode({
+      tagName: "BODY",
+      children: [article, videoPlayer],
+    }),
+    selectors: {
+      article,
+      "[data-testid='videoPlayer']": videoPlayer,
+      "[data-testid='videoPlayer'], video, [aria-label*='video'], [data-testid='card.wrapper']": videoPlayer,
+      body: null,
+    },
+  });
+
+  const win = createWindow({
+    href: "https://x.com/demo/status/9988776655",
+    hostname: "x.com",
+    pathname: "/demo/status/9988776655",
+  });
+
+  const detected = await extractPageContext(win, doc);
+  assert.equal(detected.metadata.pageKind, "x_video_post");
+  assert.equal(detected.videoContext.platform, "x");
+
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
+  assert.equal(result.videoContext.summaryInputSource, "page_text");
+  assert.equal(result.videoContext.summaryReady, true);
+  assert.equal(result.videoContext.transcriptAvailability, "unavailable");
+  assert.equal(result.videoContext.transcriptReason, "not_exposed");
+  assert.match(result.articleText, /video_post_text:/);
+});
+
+test("YouTube 无字幕但有章节和描述时会回退到 chapter_points", async () => {
+  const description = createNode({
+    tagName: "DIV",
+    textContent: "这是一段视频描述。",
+  });
+  const chapterNode = createNode({
+    tagName: "DIV",
+    textContent: "00:00 开场 02:00 重点",
+  });
+
+  const doc = createDocument({
+    title: "No Caption YouTube",
+    selectors: {
+      "#description-inline-expander": description,
+      "#secondary": createNode({ tagName: "DIV", textContent: "补充页面文本" }),
+    },
+    selectorAll: {
+      "ytd-macro-markers-list-item-renderer": [chapterNode],
+      "ytd-engagement-panel-section-list-renderer [data-testid='chapter']": [],
+      "a[href*='t=']": [],
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.youtube.com/watch?v=nocaption1",
+    hostname: "www.youtube.com",
+    pathname: "/watch",
+    fetchMap: {
+      "https://www.youtube.com/watch?v=nocaption1": {
+        text: `<script>var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[]}}};</script>`,
+      },
+    },
+  });
+
+  const detected = await extractPageContext(win, doc);
+  const resolvedVideoContext = await resolveVideoContext(win, doc, detected.videoContext);
+  const result = applyResolvedVideoContext(detected, resolvedVideoContext);
+  assert.equal(result.videoContext.summaryInputSource, "chapter_points");
+  assert.equal(result.videoContext.summaryReady, true);
+  assert.match(result.articleText, /video_chapter_points:/);
 });
 
 test("Yahoo Mail 会识别邮件正文和编辑器", async () => {
@@ -732,6 +1128,7 @@ function createWindow({ href, hostname, pathname, selection = "", fetchMap = {} 
     location: { href, hostname, pathname },
     innerWidth: 1440,
     innerHeight: 900,
+    setTimeout,
     getSelection() {
       return {
         toString() {

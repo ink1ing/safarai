@@ -34,6 +34,14 @@ const contextDebugTranscript = document.getElementById("context-debug-transcript
 const contextDebugSource = document.getElementById("context-debug-source");
 const contextDebugStatus = document.getElementById("context-debug-status");
 const contextDebugStrategy = document.getElementById("context-debug-strategy");
+const composerDebugPageKind = document.getElementById("composer-debug-page-kind");
+const composerDebugTranscript = document.getElementById("composer-debug-transcript");
+const composerDebugSource = document.getElementById("composer-debug-source");
+const composerDebugStatus = document.getElementById("composer-debug-status");
+const composerDebugStrategy = document.getElementById("composer-debug-strategy");
+const composerDebugTransport = document.getElementById("composer-debug-transport");
+const composerDebugFallback = document.getElementById("composer-debug-fallback");
+const composerDebugDetail = document.getElementById("composer-debug-detail");
 const historyThreadList = document.getElementById("history-thread-list");
 const historyActionMenu = document.getElementById("history-action-menu");
 const newChatButton = document.getElementById("new-chat-button");
@@ -112,6 +120,7 @@ const I18N = {
     give_suggestions: "Give Suggestions",
     summarize_video: "Summarize Video",
     generate_timestamps: "Generate Timestamps",
+    copy_transcript: "Copy Transcript",
     add_image: "Add Image",
     agent_mode: "Agent",
     drop_images: "Drop images here",
@@ -184,6 +193,7 @@ const I18N = {
     give_suggestions: "给出建议",
     summarize_video: "总结视频",
     generate_timestamps: "生成时间戳",
+    copy_transcript: "复制字幕",
     add_image: "添加图片",
     agent_mode: "智能体",
     drop_images: "拖放图片到这里",
@@ -340,9 +350,16 @@ resetSystemPromptButton.addEventListener("click", () => {
 
 for (const pill of document.querySelectorAll(".suggestion-pill[data-prompt]")) {
   pill.addEventListener("click", () => {
+    const action = String(pill.dataset.videoAction || "");
+    if (action === "copy-transcript") {
+      copyCurrentTranscript();
+      return;
+    }
     const prompt = pill.dataset.prompt;
     if (prompt) {
-      sendQuestion(prompt);
+      sendQuestion(prompt, {
+        ensureVideoContextResolved: pill.dataset.resolveVideo === "true",
+      });
     }
   });
 }
@@ -472,6 +489,7 @@ function sendQuestion(directPrompt, options = {}) {
     prompt,
     selectedFocus,
     attachments,
+    ensureVideoContextResolved: options.ensureVideoContextResolved === true,
   });
 }
 
@@ -1065,6 +1083,17 @@ function renderPanelState(payload) {
 
 function renderContextDebug(context) {
   const metadata = context?.metadata || {};
+  const videoContext = currentVideoContext(context);
+  const fallbackMode =
+    videoContext?.summaryInputSource ||
+    metadata.summaryInputSource ||
+    metadata.pageContextFallbackReason ||
+    "n/a";
+  const fallbackDetail =
+    videoContext?.fallbackDetail ||
+    metadata.fallbackDetail ||
+    metadata.transcriptDetail ||
+    "n/a";
   if (contextDebugPageKind) {
     contextDebugPageKind.textContent = metadata.pageKind || "n/a";
   }
@@ -1083,6 +1112,33 @@ function renderContextDebug(context) {
   if (contextDebugStrategy) {
     contextDebugStrategy.textContent = metadata.contentStrategy || "n/a";
   }
+  if (composerDebugPageKind) {
+    composerDebugPageKind.textContent = metadata.pageKind || "n/a";
+  }
+  if (composerDebugTranscript) {
+    composerDebugTranscript.textContent =
+      metadata.transcriptAvailable === "true"
+        ? `yes${metadata.transcriptLanguage ? ` (${metadata.transcriptLanguage})` : ""}`
+        : "no";
+  }
+  if (composerDebugSource) {
+    composerDebugSource.textContent = metadata.transcriptSource || "n/a";
+  }
+  if (composerDebugStatus) {
+    composerDebugStatus.textContent = metadata.transcriptStatus || "n/a";
+  }
+  if (composerDebugStrategy) {
+    composerDebugStrategy.textContent = metadata.contentStrategy || "n/a";
+  }
+  if (composerDebugTransport) {
+    composerDebugTransport.textContent = metadata.pageContextTransport || "n/a";
+  }
+  if (composerDebugFallback) {
+    composerDebugFallback.textContent = fallbackMode;
+  }
+  if (composerDebugDetail) {
+    composerDebugDetail.textContent = fallbackDetail;
+  }
 }
 
 function applyTheme(theme) {
@@ -1090,7 +1146,7 @@ function applyTheme(theme) {
 }
 
 function isVideoContext(context = currentContext) {
-  const pageKind = String(context?.metadata?.pageKind || "");
+  const pageKind = String(context?.videoContext?.pageKind || context?.metadata?.pageKind || "");
   return (
     pageKind === "youtube_video" ||
     pageKind === "bilibili_video" ||
@@ -1098,36 +1154,115 @@ function isVideoContext(context = currentContext) {
   );
 }
 
+function currentVideoContext(context = currentContext) {
+  const videoContext = context?.videoContext;
+  return videoContext && typeof videoContext === "object" ? videoContext : null;
+}
+
+function hasAvailableVideoTranscript(context = currentContext) {
+  return currentVideoContext(context)?.transcriptAvailability === "available";
+}
+
+function hasVideoSummaryReady(context = currentContext) {
+  const videoContext = currentVideoContext(context);
+  if (!videoContext) {
+    return false;
+  }
+  if (videoContext.summaryReady === true) {
+    return true;
+  }
+  return String(context?.metadata?.summaryReady || "") === "true";
+}
+
+function canGenerateVideoChapters(context = currentContext) {
+  const videoContext = currentVideoContext(context);
+  if (!videoContext) {
+    return false;
+  }
+  return (
+    videoContext.transcriptAvailability === "available" ||
+    videoContext.summaryInputSource === "chapter_points" ||
+    videoContext.summaryInputSource === "official_summary"
+  );
+}
+
+async function copyCurrentTranscript() {
+  const transcript = String(currentVideoContext()?.transcriptText || "").trim();
+  if (!transcript) {
+    return;
+  }
+
+  const copied = await copyTextToClipboard(transcript);
+  if (!copied) {
+    return;
+  }
+
+  const transcriptButton = Array.from(document.querySelectorAll(".suggestion-pill")).find(
+    (button) => button.dataset.videoAction === "copy-transcript",
+  );
+  if (transcriptButton) {
+    const originalText = transcriptButton.textContent;
+    transcriptButton.textContent = t("copied");
+    window.setTimeout(() => {
+      if (transcriptButton.dataset.videoAction === "copy-transcript") {
+        transcriptButton.textContent = originalText || t("copy_transcript");
+      }
+    }, 1200);
+  }
+}
+
 function buildVideoSummaryPrompt() {
   return currentLanguage() === "zh"
-    ? "请基于当前视频页面可读取到的字幕、描述、标题和元数据，直接总结视频的核心内容、关键观点和结论；如果缺少字幕，请明确说明并仅基于可见页面信息总结。"
-    : "Summarize the current video using the transcript, description, title, and page metadata if available. If no transcript is available, say that clearly and summarize only from visible page information.";
+    ? "请优先基于当前视频页面可读取到的字幕；如果没有字幕，则改用官方摘要、章节要点、描述、标题和页面文本，总结视频的核心内容、关键观点和结论，并明确当前使用的是哪种 fallback 信息源。"
+    : "Summarize the current video using transcript first. If transcript is unavailable, fall back to official summary, chapter points, description, title, and page text, and state clearly which fallback source was used.";
 }
 
 function buildVideoTimestampPrompt() {
   return currentLanguage() === "zh"
-    ? "请基于当前视频页面可读取到的字幕、描述、标题和元数据，生成按时间顺序排列的时间戳大纲；每一项都要包含时间点和对应内容摘要；如果缺少字幕，请明确说明并仅基于可见页面信息给出尽可能可靠的时间段划分。"
-    : "Generate timestamped chapter notes for the current video using the transcript, description, title, and page metadata if available. Include a timestamp and a short summary for each section. If no transcript is available, say that clearly and infer only what is reasonably supported by the page.";
+    ? "请优先基于当前视频页面可读取到的字幕；如果没有字幕但存在官方章节或官方摘要，则基于这些结构化信息生成时间顺序的大纲；如果两者都没有，请明确说明当前无法可靠生成时间戳。"
+    : "Generate timestamped chapter notes using transcript first. If transcript is unavailable but official chapter points or official summary exist, use them. If neither exists, say clearly that reliable timestamps are unavailable.";
 }
 
 function syncSuggestionPills() {
   const suggestionButtons = document.querySelectorAll(".suggestion-pill");
   const videoMode = isVideoContext();
+  const transcriptReady = hasAvailableVideoTranscript();
+  const summaryReady = hasVideoSummaryReady();
+  const chapterReady = canGenerateVideoChapters();
 
   if (videoMode) {
     if (suggestionButtons[0]) {
       suggestionButtons[0].textContent = t("summarize_video");
       suggestionButtons[0].dataset.prompt = buildVideoSummaryPrompt();
+      suggestionButtons[0].dataset.resolveVideo = "true";
+      suggestionButtons[0].dataset.videoAction = "summarize";
+      suggestionButtons[0].disabled = false;
+      suggestionButtons[0].title = summaryReady
+        ? ""
+        : currentLanguage() === "zh"
+          ? "将先尝试解析视频上下文，再总结视频。"
+          : "Will try to resolve video context before summarizing.";
       suggestionButtons[0].classList.remove("is-hidden");
     }
     if (suggestionButtons[1]) {
       suggestionButtons[1].textContent = t("generate_timestamps");
       suggestionButtons[1].dataset.prompt = buildVideoTimestampPrompt();
+      suggestionButtons[1].dataset.resolveVideo = "true";
+      suggestionButtons[1].dataset.videoAction = "chapters";
+      suggestionButtons[1].disabled = false;
+      suggestionButtons[1].title = chapterReady
+        ? ""
+        : currentLanguage() === "zh"
+          ? "将先尝试解析字幕或章节；如果仍不可用，会明确说明当前无法可靠生成时间戳。"
+          : "Will try to resolve transcript or chapters first; if unavailable, the answer will say timestamps are unreliable.";
       suggestionButtons[1].classList.remove("is-hidden");
     }
     if (suggestionButtons[2]) {
+      suggestionButtons[2].textContent = t("copy_transcript");
       suggestionButtons[2].dataset.prompt = "";
-      suggestionButtons[2].classList.add("is-hidden");
+      suggestionButtons[2].dataset.resolveVideo = "false";
+      suggestionButtons[2].dataset.videoAction = transcriptReady ? "copy-transcript" : "";
+      suggestionButtons[2].classList.toggle("is-hidden", !transcriptReady);
     }
     return;
   }
@@ -1136,18 +1271,28 @@ function syncSuggestionPills() {
     suggestionButtons[0].textContent = t("explain_page");
     suggestionButtons[0].dataset.prompt =
       currentLanguage() === "zh" ? "解释当前页面" : "Explain the current page";
+    suggestionButtons[0].dataset.resolveVideo = "false";
+    suggestionButtons[0].dataset.videoAction = "";
+    suggestionButtons[0].disabled = false;
     suggestionButtons[0].classList.remove("is-hidden");
   }
   if (suggestionButtons[1]) {
     suggestionButtons[1].textContent = t("translate_page");
     suggestionButtons[1].dataset.prompt =
       currentLanguage() === "zh" ? "翻译当前页面为中文" : "Translate the current page";
+    suggestionButtons[1].dataset.resolveVideo = "false";
+    suggestionButtons[1].dataset.videoAction = "";
+    suggestionButtons[1].disabled = false;
+    suggestionButtons[1].title = "";
     suggestionButtons[1].classList.remove("is-hidden");
   }
   if (suggestionButtons[2]) {
     suggestionButtons[2].textContent = t("give_suggestions");
     suggestionButtons[2].dataset.prompt =
       currentLanguage() === "zh" ? "针对当前页面给出建议" : "Give suggestions for the current page";
+    suggestionButtons[2].dataset.resolveVideo = "false";
+    suggestionButtons[2].dataset.videoAction = "";
+    suggestionButtons[2].disabled = false;
     suggestionButtons[2].classList.remove("is-hidden");
   }
 }

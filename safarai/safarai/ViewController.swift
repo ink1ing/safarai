@@ -28,6 +28,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private var nextSafariToolTabID = 1
     private var copilotLoginState: [String: String]?
     private var appUpdateState: AppUpdateResult?
+    private var videoContextEnrichmentTask: Task<Void, Never>?
+    private var videoContextEnrichmentKey: String?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -156,6 +158,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             pickAttachments()
         case "send-question":
             sendQuestion(body)
+        case "resolve-video-context":
+            resolveVideoContext(body)
         case "copy-message":
             copyMessage(body["text"] as? String)
         case "create-thread":
@@ -676,6 +680,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         let selectedFocus = (body["selectedFocus"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let attachments = parseAttachments(body["attachments"])
+        let explicitVideoResolve = body["ensureVideoContextResolved"] as? Bool ?? false
         let resolvedPrompt = prompt.isEmpty && !attachments.isEmpty
             ? AppText.localized(en: "Analyze the attached images.", zh: "请分析我附带的图片内容。")
             : prompt
@@ -686,6 +691,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
         var snapshot = PanelStateStore.load()
             ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        let ensureVideoContextResolved = explicitVideoResolve || isResolvableVideoContext(snapshot.context)
         snapshot.messages.append(
             PanelConversationMessage(
                 role: "user",
@@ -702,19 +708,36 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         evaluateRaw("beginStreamMessage()")
 
         let activeProvider = resolvedActiveProvider()
-        let contextSnapshot: PanelContextSnapshot? = {
-            guard var context = snapshot.context else { return nil }
-            if selectedFocus.isEmpty {
-                context.selection = ""
-            }
-            return context
-        }()
         let historySnapshot = snapshot.messages
 
         responseTask = Task { [weak self] in
             guard let self else { return }
             var accumulated = ""
             do {
+                var contextSnapshot: PanelContextSnapshot? = {
+                    guard var context = snapshot.context else { return nil }
+                    if selectedFocus.isEmpty {
+                        context.selection = ""
+                    }
+                    return context
+                }()
+
+                if let existingContext = contextSnapshot {
+                    let enrichedContext = ensureVideoContextResolved
+                        ? await VideoContextResolveService.shared.resolve(context: existingContext)
+                        : await VideoContextResolveService.shared.autoEnrich(context: existingContext)
+                    if enrichedContext != existingContext {
+                        var nextSnapshot = PanelStateStore.load() ?? snapshot
+                        nextSnapshot.context = enrichedContext
+                        nextSnapshot.updatedAt = Date().timeIntervalSince1970
+                        try? PanelStateStore.save(nextSnapshot)
+                        await MainActor.run {
+                            self.pushPanelState(status: AppText.localized(en: "Video context ready.", zh: "视频上下文已就绪。"), snapshot: nextSnapshot)
+                        }
+                        contextSnapshot = enrichedContext
+                    }
+                }
+
                 let stream: AsyncThrowingStream<String, Error>
                 if activeProvider == .zed {
                     stream = ZedResponseService.shared.streamQuestion(
@@ -774,6 +797,37 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                     self.responseTask = nil
                     self.pushError(error.localizedDescription)
                 }
+            }
+        }
+    }
+
+    private func isResolvableVideoContext(_ context: PanelContextSnapshot?) -> Bool {
+        guard let pageKind = context?.videoContext?.pageKind ?? context?.metadata["pageKind"] else {
+            return false
+        }
+        return pageKind == "youtube_video" || pageKind == "bilibili_video" || pageKind == "x_video_post"
+    }
+
+    private func resolveVideoContext(_ body: [String: Any]) {
+        let forceRefresh = body["forceRefresh"] as? Bool ?? false
+        pushPanelState(status: AppText.localized(en: "Resolving video context…", zh: "正在解析视频上下文…"))
+        Task { [weak self] in
+            guard let self else { return }
+            var snapshot = PanelStateStore.load()
+                ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+            guard let context = snapshot.context else {
+                await MainActor.run {
+                    self.pushPanelState(status: AppText.localized(en: "No page context available.", zh: "当前没有可用页面上下文。"))
+                }
+                return
+            }
+
+            let resolved = await VideoContextResolveService.shared.resolve(context: context, forceRefresh: forceRefresh)
+            snapshot.context = resolved
+            snapshot.updatedAt = Date().timeIntervalSince1970
+            try? PanelStateStore.save(snapshot)
+            await MainActor.run {
+                self.pushPanelState(status: AppText.localized(en: "Video context ready.", zh: "视频上下文已就绪。"), snapshot: snapshot)
             }
         }
     }
@@ -1843,25 +1897,10 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
     private func refreshPanelContext() {
         pushPanelState(status: AppText.localized(en: "Refreshing page…", zh: "正在刷新页面…"))
         Task {
-            if let latest = await SafariContextRefresher.loadFrontmostPage() {
-                var snapshot = PanelStateStore.load()
-                    ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
-                let currentContext = snapshot.context
-                snapshot.context = PanelContextSnapshot(
-                    site: currentContext?.site ?? "unsupported",
-                    url: latest.url,
-                    title: latest.title,
-                    selection: currentContext?.selection ?? "",
-                    articleText: currentContext?.articleText ?? latest.title,
-                    structureSummary: currentContext?.structureSummary,
-                    interactiveSummary: currentContext?.interactiveSummary,
-                    metadata: currentContext?.metadata ?? [:],
-                    visualSummary: currentContext?.visualSummary
-                )
-                snapshot.status = AppText.localized(en: "Page refreshed", zh: "页面已刷新")
-                snapshot.updatedAt = Date().timeIntervalSince1970
-                try? PanelStateStore.save(snapshot)
-            }
+            await self.syncFrontmostPageSnapshot(
+                status: AppText.localized(en: "Page refreshed", zh: "页面已刷新"),
+                pushAfterSave: false
+            )
         }
 
         SFSafariApplication.dispatchMessage(
@@ -1872,6 +1911,39 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 self?.pushPanelState(status: AppText.localized(en: "Page refreshed", zh: "页面已刷新"))
             }
+        }
+    }
+
+    private func syncFrontmostPageSnapshot(status: String?, pushAfterSave: Bool) async {
+        guard let latest = await SafariContextRefresher.loadFrontmostPage() else {
+            return
+        }
+
+        var snapshot = PanelStateStore.load()
+            ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+        let currentContext = snapshot.context
+        let isSamePage = currentContext?.url == latest.url
+        snapshot.context = PanelContextSnapshot(
+            site: isSamePage ? (currentContext?.site ?? "unsupported") : "unsupported",
+            url: latest.url,
+            title: latest.title,
+            selection: isSamePage ? (currentContext?.selection ?? "") : "",
+            articleText: isSamePage ? (currentContext?.articleText ?? latest.title) : latest.title,
+            structureSummary: isSamePage ? currentContext?.structureSummary : nil,
+            interactiveSummary: isSamePage ? currentContext?.interactiveSummary : nil,
+            metadata: isSamePage ? (currentContext?.metadata ?? [:]) : [:],
+            videoContext: isSamePage ? currentContext?.videoContext : nil,
+            visualSummary: isSamePage ? currentContext?.visualSummary : nil
+        )
+        snapshot.status = status
+        snapshot.updatedAt = Date().timeIntervalSince1970
+        try? PanelStateStore.save(snapshot)
+
+        guard pushAfterSave else {
+            return
+        }
+        await MainActor.run {
+            self.pushPanelState(status: status, snapshot: snapshot)
         }
     }
 
@@ -2007,6 +2079,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 "selectionFocusText": jsonValue(snapshot?.context?.selection),
                 "selectionDebug": debugSelection,
                 "metadata": snapshot?.context?.metadata ?? [:],
+                "videoContext": videoContextPayload(snapshot?.context?.videoContext),
                 "updatedAt": jsonValue(snapshot?.updatedAt)
             ],
             "messages": snapshot?.messages.map {
@@ -2033,6 +2106,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         ]
 
         evaluate(function: "renderPanelState", payload: payload)
+        scheduleVideoContextEnrichmentIfNeeded(snapshot)
     }
 
     @objc private func handleAssistantPanelRefresh() {
@@ -2074,22 +2148,100 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         pushPanelState()
     }
 
+    private func scheduleVideoContextEnrichmentIfNeeded(_ snapshot: PanelStateSnapshot?) {
+        guard let context = snapshot?.context else {
+            return
+        }
+        guard isResolvableVideoContext(context) else {
+            videoContextEnrichmentTask = nil
+            videoContextEnrichmentKey = nil
+            return
+        }
+        guard context.videoContext?.summaryReady != true, context.metadata["summaryReady"] != "true" else {
+            videoContextEnrichmentTask = nil
+            videoContextEnrichmentKey = nil
+            return
+        }
+
+        let currentStatus = context.metadata["transcriptStatus"] ?? ""
+        if currentStatus.hasPrefix("host_") {
+            return
+        }
+
+        let currentKey = videoContextEnrichmentCacheKey(for: context)
+        if videoContextEnrichmentKey == currentKey, videoContextEnrichmentTask != nil {
+            return
+        }
+
+        videoContextEnrichmentKey = currentKey
+        videoContextEnrichmentTask?.cancel()
+        videoContextEnrichmentTask = Task { [weak self] in
+            guard let self else { return }
+            let enriched = await VideoContextResolveService.shared.autoEnrich(context: context)
+            guard enriched != context else {
+                await MainActor.run {
+                    if self.videoContextEnrichmentKey == currentKey {
+                        self.videoContextEnrichmentTask = nil
+                        self.videoContextEnrichmentKey = nil
+                    }
+                }
+                return
+            }
+
+            await MainActor.run {
+                var nextSnapshot = PanelStateStore.load() ?? snapshot ?? PanelStateSnapshot(
+                    context: nil,
+                    currentThreadId: nil,
+                    messages: [],
+                    status: nil,
+                    updatedAt: Date().timeIntervalSince1970
+                )
+                nextSnapshot.context = enriched
+                nextSnapshot.updatedAt = Date().timeIntervalSince1970
+                try? PanelStateStore.save(nextSnapshot)
+                self.videoContextEnrichmentTask = nil
+                self.videoContextEnrichmentKey = nil
+                self.pushPanelState(status: nextSnapshot.status, snapshot: nextSnapshot)
+            }
+        }
+    }
+
+    private func videoContextEnrichmentCacheKey(for context: PanelContextSnapshot) -> String {
+        let pageKind = context.videoContext?.pageKind ?? context.metadata["pageKind"] ?? ""
+        let mediaId = context.videoContext?.mediaId ?? ""
+        let url = context.url
+        return [pageKind, mediaId, url].joined(separator: "::")
+    }
+
     private func createThread() {
         if responseTask != nil {
             stopCurrentResponse()
         }
 
-        let current = PanelStateStore.load()
-            ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
-        let snapshot = PanelStateSnapshot(
-            context: current.context,
-            currentThreadId: nil,
-            messages: [],
-            status: nil,
-            updatedAt: Date().timeIntervalSince1970
+        // Sync active tab URL first (best-effort, independent of content script).
+        SFSafariApplication.dispatchMessage(
+            withName: "sync-active-tab",
+            toExtensionWithIdentifier: extensionBundleIdentifier,
+            userInfo: nil,
+            completionHandler: nil
         )
-        try? PanelStateStore.save(snapshot)
-        pushPanelState(status: AppText.localized(en: "New chat created.", zh: "已创建新对话。"), snapshot: snapshot)
+
+        // Wait briefly for the extension to write the fresh URL to the shared file,
+        // then read it and build the new thread snapshot.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            let current = PanelStateStore.load()
+                ?? PanelStateSnapshot(context: nil, currentThreadId: nil, messages: [], status: nil, updatedAt: Date().timeIntervalSince1970)
+            let snapshot = PanelStateSnapshot(
+                context: current.context,
+                currentThreadId: nil,
+                messages: [],
+                status: nil,
+                updatedAt: Date().timeIntervalSince1970
+            )
+            try? PanelStateStore.save(snapshot)
+            self.pushPanelState(status: AppText.localized(en: "New chat created.", zh: "已创建新对话。"), snapshot: snapshot)
+        }
     }
 
     private func loadThread(_ threadID: String) {
@@ -2451,6 +2603,35 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         value ?? NSNull()
     }
 
+    private func videoContextPayload(_ value: PanelVideoContextSnapshot?) -> Any {
+        guard let value else {
+            return NSNull()
+        }
+
+        return [
+            "platform": value.platform,
+            "pageKind": value.pageKind,
+            "mediaId": value.mediaId,
+            "canonicalUrl": value.canonicalUrl,
+            "title": value.title,
+            "author": value.author,
+            "duration": value.duration,
+            "description": value.description,
+            "postText": value.postText,
+            "transcriptText": value.transcriptText,
+            "transcriptLanguage": value.transcriptLanguage,
+            "transcriptAvailability": value.transcriptAvailability,
+            "transcriptReason": value.transcriptReason,
+            "transcriptSource": value.transcriptSource,
+            "summaryInputSource": jsonValue(value.summaryInputSource),
+            "summaryText": jsonValue(value.summaryText),
+            "fallbackDetail": jsonValue(value.fallbackDetail),
+            "summaryReady": jsonValue(value.summaryReady),
+            "summaryMode": value.summaryMode,
+            "detectedAt": value.detectedAt,
+        ]
+    }
+
     private func normalizedTheme(_ rawValue: String?) -> String {
         let fallback = "blue"
         guard let rawValue else { return fallback }
@@ -2520,8 +2701,25 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
     private func startPanelRefreshTimer() {
         panelRefreshTimer?.invalidate()
+        var tickCount = 0
         panelRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.pushPanelState()
+            guard let self else { return }
+            self.pushPanelState()
+            tickCount += 1
+            // Every 2 seconds, directly refresh the frontmost Safari page metadata so the
+            // panel URL/title stay in sync even when the extension-side state is stale.
+            if tickCount % 2 == 0 {
+                Task { [weak self] in
+                    guard let self else { return }
+                    await self.syncFrontmostPageSnapshot(status: nil, pushAfterSave: true)
+                }
+                SFSafariApplication.dispatchMessage(
+                    withName: "sync-active-tab",
+                    toExtensionWithIdentifier: extensionBundleIdentifier,
+                    userInfo: nil,
+                    completionHandler: nil
+                )
+            }
         }
     }
 
@@ -3005,4 +3203,894 @@ func appendCustomSystemPrompt(basePrompt: String) -> String {
 用户附加系统提示:
 \(customPrompt)
 """
+}
+
+private final class YouTubeTranscriptService {
+    static let shared = YouTubeTranscriptService()
+
+    private let session: URLSession
+
+    private init() {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 25
+        configuration.timeoutIntervalForResource = 40
+        configuration.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "no-cache",
+        ]
+        session = URLSession(configuration: configuration)
+    }
+
+    func enrich(context: PanelContextSnapshot) async -> PanelContextSnapshot {
+        guard context.metadata["pageKind"] == "youtube_video" else {
+            return context
+        }
+        if context.metadata["transcriptAvailable"] == "true" {
+            return context
+        }
+        guard let pageURL = URL(string: context.url), !context.url.isEmpty else {
+            return context
+        }
+
+        do {
+            // ── Strategy 1: YouTube timedtext API (most reliable, no auth needed) ──
+            let videoId = extractYouTubeVideoId(from: context.url)
+            if !videoId.isEmpty {
+                let timedtextResult = await fetchYouTubeTimedtext(videoId: videoId)
+                if !timedtextResult.text.isEmpty {
+                    return merge(context: context, transcript: timedtextResult)
+                }
+            }
+
+            // ── Strategy 2: Parse ytInitialPlayerResponse from page HTML ──
+            let html = try await fetchText(from: pageURL)
+            guard let playerResponse = parsePlayerResponse(from: html) else {
+                return merge(
+                    context: context,
+                    transcript: TranscriptResult(
+                        text: "",
+                        status: "host_player_response_missing",
+                        detail: "player_response_missing",
+                        language: ""
+                    )
+                )
+            }
+            let tracks = captionTracks(from: playerResponse)
+            guard let track = chooseCaptionTrack(from: tracks),
+                  let baseURL = transcriptBaseURL(from: track) else {
+                return merge(
+                    context: context,
+                    transcript: TranscriptResult(
+                        text: "",
+                        status: tracks.isEmpty ? "host_no_tracks" : "host_missing_track_url",
+                        detail: tracks.isEmpty ? "no_caption_tracks" : "caption_track_missing_url",
+                        language: ""
+                    )
+                )
+            }
+
+            let transcriptResult = try await fetchTranscript(from: baseURL)
+            return merge(context: context, transcript: transcriptResult)
+        } catch {
+            if VideoContextResolveService.isCancelledNetworkError(error) {
+                return context
+            }
+            return merge(
+                context: context,
+                transcript: TranscriptResult(
+                    text: "",
+                    status: "host_fetch_failed",
+                    detail: String(describing: error).prefix(160).description,
+                    language: ""
+                )
+            )
+        }
+    }
+
+    // Extract video ID from YouTube URL (watch?v=, /shorts/, /live/)
+    private func extractYouTubeVideoId(from urlString: String) -> String {
+        guard let url = URL(string: urlString),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return ""
+        }
+        if let v = components.queryItems?.first(where: { $0.name == "v" })?.value, !v.isEmpty {
+            return v
+        }
+        let parts = url.pathComponents.filter { !$0.isEmpty && $0 != "/" }
+        if parts.first == "shorts" || parts.first == "live", let id = parts.dropFirst().first {
+            return id
+        }
+        return ""
+    }
+
+    // YouTube timedtext API — works without cookies for many videos
+    private func fetchYouTubeTimedtext(videoId: String) async -> TranscriptResult {
+        let languages = ["zh-Hans", "zh-TW", "zh", "en"]
+        for lang in languages {
+            if let result = await tryTimedtextLanguage(videoId: videoId, lang: lang),
+               !result.text.isEmpty {
+                return result
+            }
+        }
+        // Auto-generated captions (asr) as last resort
+        if let result = await tryTimedtextLanguage(videoId: videoId, lang: "en", asr: true),
+           !result.text.isEmpty {
+            return result
+        }
+        return TranscriptResult(text: "", status: "host_timedtext_unavailable", detail: "no_lang_found", language: "")
+    }
+
+    private func tryTimedtextLanguage(videoId: String, lang: String, asr: Bool = false) async -> TranscriptResult? {
+        var components = URLComponents(string: "https://www.youtube.com/api/timedtext")!
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "v", value: videoId),
+            URLQueryItem(name: "lang", value: lang),
+            URLQueryItem(name: "fmt", value: "json3"),
+        ]
+        if asr {
+            items.append(URLQueryItem(name: "kind", value: "asr"))
+        }
+        components.queryItems = items
+        guard let url = components.url else { return nil }
+
+        guard let raw = try? await fetchText(from: url), !raw.isEmpty else { return nil }
+        guard let text = parseJSON3Transcript(raw), !text.isEmpty else { return nil }
+        return TranscriptResult(
+            text: text,
+            status: asr ? "host_ok_timedtext_asr" : "host_ok_timedtext",
+            detail: "",
+            language: lang
+        )
+    }
+
+
+
+    private func merge(context: PanelContextSnapshot, transcript: TranscriptResult) -> PanelContextSnapshot {
+        var next = context
+        next.metadata["transcriptAvailable"] = transcript.text.isEmpty ? "false" : "true"
+        next.metadata["transcriptSource"] = transcript.text.isEmpty ? "" : "youtube_host_fetch"
+        next.metadata["transcriptStatus"] = transcript.status
+        next.metadata["transcriptDetail"] = transcript.detail
+        if !transcript.language.isEmpty {
+            next.metadata["transcriptLanguage"] = transcript.language
+        }
+        let currentVideoContext = context.videoContext ?? PanelVideoContextSnapshot(
+            platform: "youtube",
+            pageKind: context.metadata["pageKind"] ?? "youtube_video",
+            mediaId: "",
+            canonicalUrl: context.url,
+            title: context.metadata["videoTitle"] ?? context.title,
+            author: context.metadata["videoAuthor"] ?? "",
+            duration: context.metadata["videoDuration"] ?? "",
+            description: "",
+            postText: "",
+            transcriptText: "",
+            transcriptLanguage: "",
+            transcriptAvailability: "partial",
+            transcriptReason: "not_requested",
+            transcriptSource: "none",
+            summaryInputSource: nil,
+            summaryText: nil,
+            fallbackDetail: nil,
+            summaryReady: nil,
+            summaryMode: "metadata_only",
+            detectedAt: ISO8601DateFormatter().string(from: Date())
+        )
+        next.videoContext = PanelVideoContextSnapshot(
+            platform: currentVideoContext.platform,
+            pageKind: currentVideoContext.pageKind,
+            mediaId: currentVideoContext.mediaId,
+            canonicalUrl: currentVideoContext.canonicalUrl.isEmpty ? context.url : currentVideoContext.canonicalUrl,
+            title: currentVideoContext.title.isEmpty ? context.title : currentVideoContext.title,
+            author: currentVideoContext.author,
+            duration: currentVideoContext.duration,
+            description: currentVideoContext.description,
+            postText: currentVideoContext.postText,
+            transcriptText: transcript.text,
+            transcriptLanguage: transcript.language.isEmpty ? currentVideoContext.transcriptLanguage : transcript.language,
+            transcriptAvailability: transcript.text.isEmpty ? "unavailable" : "available",
+            transcriptReason: transcript.text.isEmpty ? "fetch_failed" : "not_requested",
+            transcriptSource: transcript.text.isEmpty ? "none" : "host_fetch",
+            summaryInputSource: transcript.text.isEmpty ? "metadata_only" : "transcript",
+            summaryText: transcript.text.isEmpty ? nil : transcript.text,
+            fallbackDetail: transcript.text.isEmpty ? "youtube_host_metadata_only" : nil,
+            summaryReady: true,
+            summaryMode: transcript.text.isEmpty ? "metadata_only" : "transcript_plus_metadata",
+            detectedAt: currentVideoContext.detectedAt
+        )
+        next.metadata["summaryReady"] = "true"
+        next.metadata["summaryInputSource"] = transcript.text.isEmpty ? "metadata_only" : "transcript"
+        next.metadata["fallbackDetail"] = transcript.text.isEmpty ? "youtube_host_metadata_only" : ""
+        next.metadata["contentStrategy"] = transcript.text.isEmpty
+            ? "youtube_metadata_only_host_fallback"
+            : "youtube_transcript_host_fallback"
+        next.articleText = buildArticleText(context: context, transcript: transcript.text)
+        return next
+    }
+
+    private func buildArticleText(context: PanelContextSnapshot, transcript: String) -> String {
+        let title = context.title
+        let url = context.url
+        let existing = context.articleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = [
+            title.isEmpty ? nil : "video_title: \(title)",
+            url.isEmpty ? nil : "video_url: \(url)",
+            existing.isEmpty ? nil : "video_page_text:\n\(String(existing.prefix(3000)))",
+            transcript.isEmpty ? nil : "video_transcript:\n\(transcript)",
+        ].compactMap { $0 }
+        return summary.joined(separator: "\n\n")
+    }
+
+    private func fetchText(from url: URL) async throws -> String {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
+        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw NSError(domain: "ink.safarai.youtube", code: code, userInfo: [NSLocalizedDescriptionKey: "HTML fetch failed with status \(code)"])
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+    }
+
+    private func captionTracks(from playerResponse: [String: Any]) -> [[String: Any]] {
+        (((playerResponse["captions"] as? [String: Any])?["playerCaptionsTracklistRenderer"] as? [String: Any])?["captionTracks"] as? [[String: Any]]) ?? []
+    }
+
+    private func chooseCaptionTrack(from tracks: [[String: Any]]) -> [String: Any]? {
+        tracks.first { ($0["kind"] as? String)?.isEmpty ?? true && preferredLanguage($0["languageCode"] as? String) }
+        ?? tracks.first { ($0["kind"] as? String)?.isEmpty ?? true }
+        ?? tracks.first
+    }
+
+    private func preferredLanguage(_ languageCode: String?) -> Bool {
+        let value = (languageCode ?? "").lowercased()
+        return value.hasPrefix("zh") || value.hasPrefix("en")
+    }
+
+    private func transcriptBaseURL(from track: [String: Any]) -> URL? {
+        let raw = String(describing: track["baseUrl"] ?? "")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "\\u0026", with: "&")
+        return URL(string: raw)
+    }
+
+    private func fetchTranscript(from baseURL: URL) async throws -> TranscriptResult {
+        let candidates = buildTranscriptCandidateURLs(from: baseURL)
+        var lastFailure = TranscriptResult(text: "", status: "host_parse_failed", detail: "unrecognized_response", language: "")
+
+        for candidate in candidates {
+            let raw = try await fetchText(from: candidate)
+            let parsed = parseTranscript(raw, formatHint: candidate.query ?? "")
+            if !parsed.text.isEmpty {
+                return parsed
+            }
+            lastFailure = parsed
+        }
+
+        return lastFailure
+    }
+
+    private func buildTranscriptCandidateURLs(from baseURL: URL) -> [URL] {
+        var urls = [URL]()
+        urls.append(appendingQuery(name: "fmt", value: "json3", to: baseURL))
+        urls.append(appendingQuery(name: "fmt", value: "srv3", to: baseURL))
+        urls.append(appendingQuery(name: "fmt", value: "ttml", to: baseURL))
+        urls.append(baseURL)
+        var deduped = [URL]()
+        var seen = Set<String>()
+        for url in urls where seen.insert(url.absoluteString).inserted {
+            deduped.append(url)
+        }
+        return deduped
+    }
+
+    private func appendingQuery(name: String, value: String, to url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == name }
+        items.append(URLQueryItem(name: name, value: value))
+        components.queryItems = items
+        return components.url ?? url
+    }
+
+    private func parseTranscript(_ raw: String, formatHint: String) -> TranscriptResult {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return TranscriptResult(text: "", status: "host_empty_response", detail: formatHint.isEmpty ? "empty" : formatHint, language: "")
+        }
+        let strippedJSON = trimmed.replacingOccurrences(of: ")]}'", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if let jsonText = parseJSON3Transcript(strippedJSON), !jsonText.isEmpty {
+            return TranscriptResult(text: jsonText, status: "host_ok_json3", detail: "", language: "")
+        }
+        if let xmlText = parseXMLTranscript(trimmed), !xmlText.isEmpty {
+            return TranscriptResult(text: xmlText, status: "host_ok_xml", detail: "", language: "")
+        }
+        if let ttmlText = parseTTMLTranscript(trimmed), !ttmlText.isEmpty {
+            return TranscriptResult(text: ttmlText, status: "host_ok_ttml", detail: "", language: "")
+        }
+        let prefix = String(trimmed.prefix(120)).replacingOccurrences(of: "\n", with: " ")
+        return TranscriptResult(text: "", status: "host_parse_failed", detail: prefix, language: "")
+    }
+
+    private func parseJSON3Transcript(_ raw: String) -> String? {
+        guard
+            let data = raw.data(using: .utf8),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let events = payload["events"] as? [[String: Any]]
+        else {
+            return nil
+        }
+
+        let lines = events.compactMap { event -> String? in
+            let start = formatTimestamp(milliseconds: event["tStartMs"] as? Double ?? Double((event["tStartMs"] as? NSNumber)?.doubleValue ?? 0))
+            let text = ((event["segs"] as? [[String: Any]]) ?? [])
+                .compactMap { $0["utf8"] as? String }
+                .joined()
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return start.isEmpty ? text : "[\(start)] \(text)"
+        }
+        let value = lines.joined(separator: "\n")
+        return value.isEmpty ? nil : String(value.prefix(16_000))
+    }
+
+    private func parseXMLTranscript(_ raw: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"<text[^>]*start="([^"]+)"[^>]*>([\s\S]*?)</text>"#) else {
+            return nil
+        }
+        let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        let lines = regex.matches(in: raw, range: range).compactMap { match -> String? in
+            guard
+                let startRange = Range(match.range(at: 1), in: raw),
+                let textRange = Range(match.range(at: 2), in: raw)
+            else {
+                return nil
+            }
+            let startSeconds = Double(raw[startRange]) ?? 0
+            let timestamp = formatTimestamp(milliseconds: startSeconds * 1000)
+            let text = decodeHTML(String(raw[textRange]))
+                .replacingOccurrences(of: #"<br\s*/?>"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return timestamp.isEmpty ? text : "[\(timestamp)] \(text)"
+        }
+        let value = lines.joined(separator: "\n")
+        return value.isEmpty ? nil : String(value.prefix(16_000))
+    }
+
+    private func parseTTMLTranscript(_ raw: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"<p[^>]*\bt="([^"]+)"[^>]*>([\s\S]*?)</p>"#) else {
+            return nil
+        }
+        let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        let lines = regex.matches(in: raw, range: range).compactMap { match -> String? in
+            guard
+                let startRange = Range(match.range(at: 1), in: raw),
+                let textRange = Range(match.range(at: 2), in: raw)
+            else {
+                return nil
+            }
+            let startMilliseconds = Double(raw[startRange]) ?? 0
+            let timestamp = formatTimestamp(milliseconds: startMilliseconds)
+            let text = decodeHTML(String(raw[textRange]))
+                .replacingOccurrences(of: #"<s[^>]*>"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"</s>"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"<br\s*/?>"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return timestamp.isEmpty ? text : "[\(timestamp)] \(text)"
+        }
+        let value = lines.joined(separator: "\n")
+        return value.isEmpty ? nil : String(value.prefix(16_000))
+    }
+
+    private func parsePlayerResponse(from html: String) -> [String: Any]? {
+        parseEmbeddedJSON(named: "ytInitialPlayerResponse", in: html)
+        ?? parseEmbeddedJSON(named: "var ytInitialPlayerResponse", in: html)
+    }
+
+    private func parseEmbeddedJSON(named marker: String, in source: String) -> [String: Any]? {
+        guard let markerRange = source.range(of: marker) else {
+            return nil
+        }
+        guard let start = source[markerRange.upperBound...].firstIndex(of: "{") else {
+            return nil
+        }
+        var depth = 0
+        var cursor = start
+        var inString = false
+        var escaped = false
+
+        while cursor < source.endIndex {
+            let character = source[cursor]
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                inString.toggle()
+            } else if !inString {
+                if character == "{" {
+                    depth += 1
+                } else if character == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        let jsonString = String(source[start...cursor])
+                        guard
+                            let data = jsonString.data(using: .utf8),
+                            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                        else {
+                            return nil
+                        }
+                        return payload
+                    }
+                }
+            }
+            cursor = source.index(after: cursor)
+        }
+        return nil
+    }
+
+    private func decodeHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+    }
+
+    private func formatTimestamp(milliseconds: Double) -> String {
+        let totalSeconds = max(0, Int(milliseconds / 1000))
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        if hours > 0 {
+            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+private final class VideoContextResolveService {
+    static let shared = VideoContextResolveService()
+
+    private let session: URLSession
+    private let iso8601 = ISO8601DateFormatter()
+
+    private init() {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 25
+        configuration.timeoutIntervalForResource = 40
+        configuration.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "no-cache",
+        ]
+        session = URLSession(configuration: configuration)
+    }
+
+    func autoEnrich(context: PanelContextSnapshot) async -> PanelContextSnapshot {
+        return await resolve(context: context, forceRefresh: false)
+    }
+
+    func resolve(context: PanelContextSnapshot, forceRefresh: Bool = false) async -> PanelContextSnapshot {
+        let pageKind = context.metadata["pageKind"] ?? context.videoContext?.pageKind ?? ""
+        guard pageKind == "youtube_video" || pageKind == "bilibili_video" || pageKind == "x_video_post" else {
+            return context
+        }
+
+        if !forceRefresh, context.videoContext?.transcriptAvailability == "available" {
+            return context
+        }
+        if !forceRefresh, context.videoContext?.summaryReady == true {
+            return context
+        }
+
+        switch pageKind {
+        case "youtube_video":
+            return await YouTubeTranscriptService.shared.enrich(context: withBaseVideoContext(context))
+        case "bilibili_video":
+            return await resolveBilibili(context: withBaseVideoContext(context))
+        case "x_video_post":
+            return resolveX(context: withBaseVideoContext(context))
+        default:
+            return context
+        }
+    }
+
+    private func withBaseVideoContext(_ context: PanelContextSnapshot) -> PanelContextSnapshot {
+        guard context.videoContext == nil else {
+            return context
+        }
+
+        var next = context
+        next.videoContext = PanelVideoContextSnapshot(
+            platform: inferredPlatform(from: context),
+            pageKind: context.metadata["pageKind"] ?? "",
+            mediaId: inferredMediaID(from: context.url, pageKind: context.metadata["pageKind"] ?? ""),
+            canonicalUrl: context.url,
+            title: context.metadata["videoTitle"] ?? context.title,
+            author: context.metadata["videoAuthor"] ?? "",
+            duration: context.metadata["videoDuration"] ?? "",
+            description: "",
+            postText: "",
+            transcriptText: "",
+            transcriptLanguage: "",
+            transcriptAvailability: "partial",
+            transcriptReason: "not_requested",
+            transcriptSource: "none",
+            summaryInputSource: nil,
+            summaryText: nil,
+            fallbackDetail: nil,
+            summaryReady: nil,
+            summaryMode: "metadata_only",
+            detectedAt: iso8601.string(from: Date())
+        )
+        return next
+    }
+
+    private func resolveBilibili(context: PanelContextSnapshot) async -> PanelContextSnapshot {
+        guard let pageURL = URL(string: context.url), !context.url.isEmpty else {
+            return context
+        }
+
+        do {
+            let html = try await fetchText(from: pageURL)
+            let playInfo =
+                parseEmbeddedJSON(named: "__playinfo__", in: html) ??
+                parseEmbeddedJSON(named: "window.__playinfo__", in: html)
+            let rootData = playInfo?["data"] as? [String: Any]
+            let subtitleList = ((rootData?["subtitle"] as? [String: Any])?["subtitles"] as? [[String: Any]])
+                ?? ((playInfo?["subtitle"] as? [String: Any])?["subtitles"] as? [[String: Any]])
+                ?? []
+            let preferredTrack = chooseBilibiliTrack(from: subtitleList)
+            let subtitleURL = normalizeBilibiliSubtitleURL(String(describing: preferredTrack?["subtitle_url"] ?? ""))
+            let transcriptText = subtitleURL == nil ? "" : (try await fetchBilibiliTranscript(from: subtitleURL!))
+
+            var videoContext = context.videoContext ?? baseVideoContext(for: context)
+            videoContext.transcriptText = transcriptText
+            videoContext.transcriptLanguage = String(describing: preferredTrack?["lan_doc"] ?? preferredTrack?["lan"] ?? "")
+            videoContext.transcriptAvailability = transcriptText.isEmpty ? "unavailable" : "available"
+            videoContext.transcriptReason = transcriptText.isEmpty ? (subtitleURL == nil ? "no_tracks" : "fetch_failed") : "not_requested"
+            videoContext.transcriptSource = transcriptText.isEmpty ? "none" : "subtitle_api"
+            videoContext.summaryInputSource = transcriptText.isEmpty ? "page_text" : "transcript"
+            videoContext.summaryText = transcriptText.isEmpty
+                ? [videoContext.description, context.articleText].compactMap { value in
+                    let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return text.isEmpty ? nil : String(text.prefix(4000))
+                }.joined(separator: "\n")
+                : transcriptText
+            videoContext.fallbackDetail = transcriptText.isEmpty ? "bilibili_no_subtitles_page_text" : nil
+            videoContext.summaryReady = true
+            videoContext.summaryMode = transcriptText.isEmpty ? "fallback_summary" : "transcript_plus_metadata"
+
+            return merge(context: context, videoContext: videoContext)
+        } catch {
+            if VideoContextResolveService.isCancelledNetworkError(error) {
+                return context
+            }
+            return markVideoFailure(context: context, reason: "fetch_failed")
+        }
+    }
+
+    private func resolveX(context: PanelContextSnapshot) -> PanelContextSnapshot {
+        var videoContext = context.videoContext ?? baseVideoContext(for: context)
+        if videoContext.postText.isEmpty {
+            videoContext.postText = context.articleText
+        }
+        videoContext.transcriptText = ""
+        videoContext.transcriptAvailability = "unavailable"
+        videoContext.transcriptReason = "not_exposed"
+        videoContext.transcriptSource = "none"
+        videoContext.summaryInputSource = "page_text"
+        videoContext.summaryText = [videoContext.postText, videoContext.description]
+            .compactMap { value in
+                let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.isEmpty ? nil : text
+            }
+            .joined(separator: "\n")
+        videoContext.fallbackDetail = "x_no_captions_page_text"
+        videoContext.summaryReady = true
+        videoContext.summaryMode = "fallback_summary"
+        return merge(context: context, videoContext: videoContext)
+    }
+
+    private func merge(context: PanelContextSnapshot, videoContext: PanelVideoContextSnapshot) -> PanelContextSnapshot {
+        var next = context
+        next.videoContext = videoContext
+        next.metadata["pageKind"] = videoContext.pageKind
+        next.metadata["videoPlatform"] = videoContext.platform
+        next.metadata["videoTitle"] = videoContext.title
+        next.metadata["videoAuthor"] = videoContext.author
+        next.metadata["videoDuration"] = videoContext.duration
+        next.metadata["transcriptAvailable"] = videoContext.transcriptAvailability == "available" ? "true" : "false"
+        next.metadata["transcriptLanguage"] = videoContext.transcriptLanguage
+        next.metadata["transcriptSource"] = videoContext.transcriptSource == "none" ? "" : videoContext.transcriptSource
+        next.metadata["summaryReady"] = videoContext.summaryReady == true ? "true" : "false"
+        next.metadata["summaryInputSource"] = videoContext.summaryInputSource ?? ""
+        next.metadata["fallbackDetail"] = videoContext.fallbackDetail ?? ""
+        next.metadata["transcriptStatus"] = videoContext.transcriptAvailability == "available" ? "ok" : videoContext.transcriptReason
+        next.metadata["transcriptDetail"] = videoContext.transcriptAvailability == "available" ? "" : (videoContext.fallbackDetail ?? videoContext.transcriptReason)
+        next.metadata["contentStrategy"] = buildHostFallbackContentStrategy(videoContext)
+        next.articleText = buildArticleText(context: context, videoContext: videoContext)
+        let videoLine = buildVideoSummaryLine(videoContext: videoContext)
+        let existingLines = (next.structureSummary ?? "")
+            .split(separator: "\n")
+            .filter { !$0.hasPrefix("video_context:") }
+            .map(String.init)
+        next.structureSummary = (existingLines + [videoLine].filter { !$0.isEmpty }).joined(separator: "\n")
+        return next
+    }
+
+    private func markVideoFailure(context: PanelContextSnapshot, reason: String) -> PanelContextSnapshot {
+        var videoContext = context.videoContext ?? baseVideoContext(for: context)
+        videoContext.transcriptText = ""
+        videoContext.transcriptAvailability = "unavailable"
+        videoContext.transcriptReason = reason
+        videoContext.transcriptSource = "none"
+        videoContext.summaryInputSource = "metadata_only"
+        videoContext.summaryText = [videoContext.title, videoContext.description, videoContext.postText]
+            .compactMap { value in
+                let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.isEmpty ? nil : text
+            }
+            .joined(separator: "\n")
+        videoContext.fallbackDetail = "\(videoContext.platform)_metadata_only"
+        videoContext.summaryReady = true
+        videoContext.summaryMode = "metadata_only"
+        return merge(context: context, videoContext: videoContext)
+    }
+
+    private func buildArticleText(context: PanelContextSnapshot, videoContext: PanelVideoContextSnapshot) -> String {
+        let fallbackPageText = context.articleText.hasPrefix("video_title:") ? "" : String(context.articleText.prefix(4000))
+        let sections = [
+            videoContext.title.isEmpty ? nil : "video_title: \(videoContext.title)",
+            videoContext.author.isEmpty ? nil : "video_author: \(videoContext.author)",
+            videoContext.duration.isEmpty ? nil : "video_duration: \(videoContext.duration)",
+            context.url.isEmpty ? nil : "video_url: \(context.url)",
+            videoContext.description.isEmpty ? nil : "video_description:\n\(String(videoContext.description.prefix(3000)))",
+            videoContext.postText.isEmpty ? nil : "video_post_text:\n\(String(videoContext.postText.prefix(3000)))",
+            videoContext.transcriptText.isEmpty ? nil : "video_transcript:\n\(videoContext.transcriptText)",
+            videoContext.transcriptText.isEmpty && !(videoContext.summaryText ?? "").isEmpty ? "video_summary:\n\(String((videoContext.summaryText ?? "").prefix(4000)))" : nil,
+            videoContext.transcriptText.isEmpty && (videoContext.summaryText ?? "").isEmpty && !fallbackPageText.isEmpty ? "video_page_text:\n\(fallbackPageText)" : nil,
+        ].compactMap { $0 }
+        return sections.joined(separator: "\n\n")
+    }
+
+    private func buildVideoSummaryLine(videoContext: PanelVideoContextSnapshot) -> String {
+        let value = [
+            "platform=\(videoContext.platform)",
+            "page=\(videoContext.pageKind)",
+            videoContext.title.isEmpty ? nil : "title=\(videoContext.title)",
+            videoContext.author.isEmpty ? nil : "author=\(videoContext.author)",
+            videoContext.duration.isEmpty ? nil : "duration=\(videoContext.duration)",
+            "transcript=\(videoContext.transcriptAvailability)",
+            "summary_ready=\(videoContext.summaryReady == true)",
+            (videoContext.summaryInputSource ?? "").isEmpty ? nil : "summary_source=\(videoContext.summaryInputSource ?? "")",
+            videoContext.transcriptLanguage.isEmpty ? nil : "language=\(videoContext.transcriptLanguage)",
+            videoContext.transcriptSource == "none" ? nil : "source=\(videoContext.transcriptSource)",
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ; ")
+        return value.isEmpty ? "" : "video_context: \(value)"
+    }
+
+    private func buildHostFallbackContentStrategy(_ videoContext: PanelVideoContextSnapshot) -> String {
+        if videoContext.transcriptAvailability == "available" {
+            return "\(videoContext.platform)_transcript_host_fallback"
+        }
+        return "\(videoContext.platform)_\((videoContext.summaryInputSource ?? "metadata_only"))_host_fallback"
+    }
+
+    fileprivate static func isCancelledNetworkError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
+    private func baseVideoContext(for context: PanelContextSnapshot) -> PanelVideoContextSnapshot {
+        context.videoContext ?? PanelVideoContextSnapshot(
+            platform: inferredPlatform(from: context),
+            pageKind: context.metadata["pageKind"] ?? "",
+            mediaId: inferredMediaID(from: context.url, pageKind: context.metadata["pageKind"] ?? ""),
+            canonicalUrl: context.url,
+            title: context.metadata["videoTitle"] ?? context.title,
+            author: context.metadata["videoAuthor"] ?? "",
+            duration: context.metadata["videoDuration"] ?? "",
+            description: "",
+            postText: "",
+            transcriptText: "",
+            transcriptLanguage: "",
+            transcriptAvailability: "partial",
+            transcriptReason: "not_requested",
+            transcriptSource: "none",
+            summaryInputSource: nil,
+            summaryText: nil,
+            fallbackDetail: nil,
+            summaryReady: nil,
+            summaryMode: "metadata_only",
+            detectedAt: iso8601.string(from: Date())
+        )
+    }
+
+    private func inferredPlatform(from context: PanelContextSnapshot) -> String {
+        if let value = context.videoContext?.platform, !value.isEmpty {
+            return value
+        }
+        let pageKind = context.metadata["pageKind"] ?? ""
+        if pageKind.hasPrefix("youtube") { return "youtube" }
+        if pageKind.hasPrefix("bilibili") { return "bilibili" }
+        if pageKind.hasPrefix("x_") { return "x" }
+        return context.site
+    }
+
+    private func inferredMediaID(from url: String, pageKind: String) -> String {
+        guard let parsed = URL(string: url) else {
+            return ""
+        }
+        if pageKind == "youtube_video" {
+            if let value = URLComponents(url: parsed, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "v" })?.value {
+                return value
+            }
+            let parts = parsed.path.split(separator: "/")
+            if parts.first == "shorts" || parts.first == "live" {
+                return parts.dropFirst().first.map(String.init) ?? ""
+            }
+        }
+        if pageKind == "bilibili_video" {
+            let parts = parsed.path.split(separator: "/")
+            if parts.count >= 2 {
+                return String(parts[1])
+            }
+            return ""
+        }
+        if pageKind == "x_video_post" {
+            let match = parsed.path.range(of: #"/status/(\d+)"#, options: .regularExpression)
+            return match.map { String(parsed.path[$0]).replacingOccurrences(of: "/status/", with: "") } ?? ""
+        }
+        return ""
+    }
+
+    private func fetchText(from url: URL) async throws -> String {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        // Add platform-specific Referer to improve success rate
+        let host = url.host ?? ""
+        if host.contains("youtube") || host.contains("googlevideo") {
+            request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
+            request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        } else if host.contains("bilibili") {
+            request.setValue("https://www.bilibili.com", forHTTPHeaderField: "Referer")
+            request.setValue("https://www.bilibili.com", forHTTPHeaderField: "Origin")
+        }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw NSError(domain: "ink.safarai.video", code: code, userInfo: [NSLocalizedDescriptionKey: "HTML fetch failed with status \(code)"])
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+    }
+
+    private func fetchJSON(from url: URL) async throws -> [String: Any] {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw NSError(domain: "ink.safarai.video", code: 2, userInfo: [NSLocalizedDescriptionKey: "JSON fetch failed"])
+        }
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(domain: "ink.safarai.video", code: 3, userInfo: [NSLocalizedDescriptionKey: "JSON parse failed"])
+        }
+        return payload
+    }
+
+    private func chooseBilibiliTrack(from tracks: [[String: Any]]) -> [String: Any]? {
+        tracks.first {
+            let value = String(describing: $0["lan_doc"] ?? $0["lan"] ?? "").lowercased()
+            return !value.contains("auto") && (value.hasPrefix("zh") || value.hasPrefix("en"))
+        }
+        ?? tracks.first { !String(describing: $0["lan_doc"] ?? $0["lan"] ?? "").lowercased().contains("auto") }
+        ?? tracks.first
+    }
+
+    private func normalizeBilibiliSubtitleURL(_ raw: String) -> URL? {
+        guard !raw.isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("//") {
+            return URL(string: "https:\(raw)")
+        }
+        return URL(string: raw)
+    }
+
+    private func fetchBilibiliTranscript(from url: URL) async throws -> String {
+        let payload = try await fetchJSON(from: url)
+        let body = payload["body"] as? [[String: Any]] ?? []
+        let lines = body.compactMap { item -> String? in
+            let text = String(describing: item["content"] ?? "")
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            let from = (item["from"] as? Double) ?? Double((item["from"] as? NSNumber)?.doubleValue ?? 0)
+            return "[\(formatTimestamp(milliseconds: from * 1000))] \(text)"
+        }
+        return String(lines.joined(separator: "\n").prefix(16_000))
+    }
+
+    private func parseEmbeddedJSON(named marker: String, in source: String) -> [String: Any]? {
+        guard let markerRange = source.range(of: marker) else {
+            return nil
+        }
+        guard let start = source[markerRange.upperBound...].firstIndex(of: "{") else {
+            return nil
+        }
+        var depth = 0
+        var cursor = start
+        var inString = false
+        var escaped = false
+
+        while cursor < source.endIndex {
+            let character = source[cursor]
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                inString.toggle()
+            } else if !inString {
+                if character == "{" {
+                    depth += 1
+                } else if character == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        let jsonString = String(source[start...cursor])
+                        guard
+                            let data = jsonString.data(using: .utf8),
+                            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                        else {
+                            return nil
+                        }
+                        return payload
+                    }
+                }
+            }
+            cursor = source.index(after: cursor)
+        }
+        return nil
+    }
+
+    private func formatTimestamp(milliseconds: Double) -> String {
+        let totalSeconds = max(0, Int(milliseconds / 1000))
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        if hours > 0 {
+            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+private struct TranscriptResult {
+    let text: String
+    let status: String
+    let detail: String
+    let language: String
 }

@@ -43,15 +43,32 @@ class SafariWebExtensionHandler: SFSafariExtensionHandler {
     }
 
     override func messageReceivedFromContainingApp(withName messageName: String, userInfo: [String : Any]? = nil) {
+        if messageName == "sync-active-tab" {
+            // Pull the current tab's URL/title and update the shared state file.
+            // ViewController's 1-second timer will pick up the change and re-render.
+            SFSafariApplication.getActiveWindow { window in
+                guard let window else { return }
+                window.getActiveTab { tab in
+                    guard let tab else { return }
+                    tab.getActivePage { page in
+                        guard let page else { return }
+                        page.getPropertiesWithCompletionHandler { properties in
+                            guard let url = properties?.url?.absoluteString, !url.isEmpty else { return }
+                            let title = properties?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            try? PanelStateWriter.updatePage(title: title, url: url)
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         guard messageName == "refresh-active-page" else {
             return
         }
 
-        SFSafariApplication.getAllWindows { windows in
-            guard let window = windows.first else {
-                return
-            }
-
+        SFSafariApplication.getActiveWindow { window in
+            guard let window else { return }
             window.getActiveTab { tab in
                 guard let tab else {
                     return

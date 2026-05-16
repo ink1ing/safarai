@@ -306,12 +306,12 @@ final class CodexOAuthService {
                 case .ready:
                     resolutionState.finish {
                         listener.stateUpdateHandler = nil
-                        continuation.resume(returning: ())
+                        Task { continuation.resume(returning: ()) }
                     }
                 case .failed(let error):
                     resolutionState.finish {
                         listener.stateUpdateHandler = nil
-                        continuation.resume(throwing: error)
+                        Task { continuation.resume(throwing: error) }
                     }
                 default:
                     break

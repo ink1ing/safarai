@@ -108,7 +108,7 @@ final class CodexResponseService {
         }
         configuration = try await CodexOAuthService.shared.refreshIfNeeded(configuration)
 
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "model": "gpt-5.4",
             "input": input,
             "tools": tools,

@@ -1,4 +1,4 @@
-export const SUPPORTED_SITES = ["github", "gmail", "x", "yahoo_mail"];
+export const SUPPORTED_SITES = ["github", "gmail", "youtube", "bilibili", "x", "yahoo_mail"];
 
 export function generateRequestId() {
   return `req_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;

@@ -7,8 +7,12 @@ enum SharedContainer {
             return url
         }
 
-        return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("safarai-shared", isDirectory: true)
+        let baseDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return baseDirectory
+            .appendingPathComponent("ink.safarai", isDirectory: true)
+            .appendingPathComponent("debug-shared", isDirectory: true)
     }()
 
     static func baseURL() -> URL {

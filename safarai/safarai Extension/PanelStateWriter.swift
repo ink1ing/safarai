@@ -7,7 +7,7 @@ enum PanelStateWriter {
     static func save(payload: [String: Any], status: String? = nil) throws {
         let current = loadRawSnapshot() ?? [:]
         let context = payload["context"] as? [String: Any]
-        let normalizedIncomingContext = preserveSelection(
+        let normalizedIncomingContext = preserveContext(
             currentContext: current["context"] as? [String: Any],
             incomingContext: normalizeContext(context)
         )
@@ -102,6 +102,7 @@ enum PanelStateWriter {
             "structureSummary": context["structureSummary"] ?? NSNull(),
             "interactiveSummary": context["interactiveSummary"] ?? NSNull(),
             "metadata": metadata,
+            "videoContext": normalizeVideoContext(context["videoContext"] as? [String: Any]) ?? NSNull(),
             "debugSelection": debugSelection,
             "visualSummary": buildVisualSummary(context, metadata: metadata) as Any,
         ]
@@ -143,7 +144,7 @@ enum PanelStateWriter {
         return current
     }
 
-    private static func preserveSelection(
+    private static func preserveContext(
         currentContext: [String: Any]?,
         incomingContext: [String: Any]?
     ) -> [String: Any]? {
@@ -160,7 +161,171 @@ enum PanelStateWriter {
             incomingContext["selection"] = currentSelection
         }
 
+        guard
+            currentURL == incomingURL,
+            !currentURL.isEmpty,
+            var incomingMetadata = incomingContext["metadata"] as? [String: String]
+        else {
+            return incomingContext
+        }
+
+        let currentMetadata = currentContext?["metadata"] as? [String: String] ?? [:]
+        let currentTranscriptAvailable = currentMetadata["transcriptAvailable"] == "true"
+        let incomingTranscriptAvailable = incomingMetadata["transcriptAvailable"] == "true"
+        let currentTranscriptStatus = currentMetadata["transcriptStatus"] ?? ""
+        let incomingTranscriptStatus = incomingMetadata["transcriptStatus"] ?? ""
+        let currentArticleText = String(describing: currentContext?["articleText"] ?? "")
+        let incomingArticleText = String(describing: incomingContext["articleText"] ?? "")
+        let currentVideoContext = currentContext?["videoContext"] as? [String: Any]
+        let incomingVideoContext = incomingContext["videoContext"] as? [String: Any]
+        let currentTranscriptText = String(describing: currentVideoContext?["transcriptText"] ?? "")
+        let incomingTranscriptText = String(describing: incomingVideoContext?["transcriptText"] ?? "")
+        let currentTranscriptAvailability = String(describing: currentVideoContext?["transcriptAvailability"] ?? "")
+        let incomingTranscriptAvailability = String(describing: incomingVideoContext?["transcriptAvailability"] ?? "")
+        let currentSummaryReady = String(describing: currentVideoContext?["summaryReady"] ?? "") == "true"
+        let incomingSummaryReady = String(describing: incomingVideoContext?["summaryReady"] ?? "") == "true"
+        let currentSummarySource = String(describing: currentVideoContext?["summaryInputSource"] ?? "")
+        let incomingSummarySource = String(describing: incomingVideoContext?["summaryInputSource"] ?? "")
+        let currentContentStrategy = currentMetadata["contentStrategy"] ?? ""
+        let incomingContentStrategy = incomingMetadata["contentStrategy"] ?? ""
+
+        if currentTranscriptAvailable && !incomingTranscriptAvailable {
+            copyCurrentVideoState(
+                currentContext: currentContext,
+                currentMetadata: currentMetadata,
+                currentVideoContext: currentVideoContext,
+                currentArticleText: currentArticleText,
+                incomingContext: &incomingContext,
+                incomingMetadata: &incomingMetadata,
+                metadataKeys: ["transcriptAvailable", "transcriptLanguage", "transcriptSource", "transcriptStatus", "transcriptDetail", "contentStrategy"]
+            )
+        } else if currentTranscriptStatus.hasPrefix("host_"), !incomingTranscriptAvailable {
+            // Keep host-side fetch results stable for the same page even if extension refreshes
+            // fall back to weaker direct/page probes.
+            if currentSummaryReady || currentVideoContext != nil {
+                copyCurrentVideoState(
+                    currentContext: currentContext,
+                    currentMetadata: currentMetadata,
+                    currentVideoContext: currentVideoContext,
+                    currentArticleText: currentArticleText,
+                    incomingContext: &incomingContext,
+                    incomingMetadata: &incomingMetadata,
+                    metadataKeys: [
+                        "transcriptAvailable",
+                        "transcriptLanguage",
+                        "transcriptSource",
+                        "transcriptStatus",
+                        "transcriptDetail",
+                        "contentStrategy",
+                        "summaryReady",
+                        "summaryInputSource",
+                        "fallbackDetail"
+                    ]
+                )
+            } else {
+                for key in ["transcriptStatus", "transcriptDetail"] {
+                    if let value = currentMetadata[key], !value.isEmpty {
+                        incomingMetadata[key] = value
+                    }
+                }
+                if incomingTranscriptStatus.isEmpty, !currentArticleText.isEmpty, incomingArticleText.isEmpty {
+                    incomingContext["articleText"] = currentArticleText
+                }
+            }
+        } else if !currentTranscriptText.isEmpty, incomingTranscriptText.isEmpty, let currentVideoContext {
+            incomingContext["videoContext"] = currentVideoContext
+            if incomingArticleText.isEmpty, !currentArticleText.isEmpty {
+                incomingContext["articleText"] = currentArticleText
+            }
+        } else if currentTranscriptAvailability != "partial",
+                  (incomingTranscriptAvailability == "partial" || incomingTranscriptStatus == "pending" || incomingTranscriptStatus.isEmpty),
+                  currentVideoContext != nil {
+            copyCurrentVideoState(
+                currentContext: currentContext,
+                currentMetadata: currentMetadata,
+                currentVideoContext: currentVideoContext,
+                currentArticleText: currentArticleText,
+                incomingContext: &incomingContext,
+                incomingMetadata: &incomingMetadata,
+                metadataKeys: ["transcriptAvailable", "transcriptLanguage", "transcriptSource", "transcriptStatus", "transcriptDetail", "contentStrategy"]
+            )
+        } else if currentSummaryReady,
+                  shouldPreferCurrentSummary(
+                    currentSummaryReady: currentSummaryReady,
+                    incomingSummaryReady: incomingSummaryReady,
+                    currentSummarySource: currentSummarySource,
+                    incomingSummarySource: incomingSummarySource,
+                    currentContentStrategy: currentContentStrategy,
+                    incomingContentStrategy: incomingContentStrategy
+                  ),
+                  currentVideoContext != nil {
+            copyCurrentVideoState(
+                currentContext: currentContext,
+                currentMetadata: currentMetadata,
+                currentVideoContext: currentVideoContext,
+                currentArticleText: currentArticleText,
+                incomingContext: &incomingContext,
+                incomingMetadata: &incomingMetadata,
+                metadataKeys: ["contentStrategy", "fallbackDetail", "summaryInputSource", "summaryReady", "transcriptDetail"]
+            )
+        }
+
+        incomingContext["metadata"] = incomingMetadata
+
         return incomingContext
+    }
+
+    private static func copyCurrentVideoState(
+        currentContext: [String: Any]?,
+        currentMetadata: [String: String],
+        currentVideoContext: [String: Any]?,
+        currentArticleText: String,
+        incomingContext: inout [String: Any],
+        incomingMetadata: inout [String: String],
+        metadataKeys: [String]
+    ) {
+        if let currentVideoContext {
+            incomingContext["videoContext"] = currentVideoContext
+        }
+        for key in metadataKeys {
+            if let value = currentMetadata[key], !value.isEmpty {
+                incomingMetadata[key] = value
+            }
+        }
+        if !currentArticleText.isEmpty {
+            incomingContext["articleText"] = currentArticleText
+        }
+        if let structureSummary = currentContext?["structureSummary"] {
+            incomingContext["structureSummary"] = structureSummary
+        }
+    }
+
+    private static func shouldPreferCurrentSummary(
+        currentSummaryReady: Bool,
+        incomingSummaryReady: Bool,
+        currentSummarySource: String,
+        incomingSummarySource: String,
+        currentContentStrategy: String,
+        incomingContentStrategy: String
+    ) -> Bool {
+        guard currentSummaryReady else {
+            return false
+        }
+        let currentRank = summarySourceRank(currentSummarySource)
+        let incomingRank = summarySourceRank(incomingSummarySource)
+        if !incomingSummaryReady || currentRank > incomingRank {
+            return true
+        }
+        if currentRank == incomingRank,
+           !isHostFallbackStrategy(currentContentStrategy),
+           isHostFallbackStrategy(incomingContentStrategy) {
+            return true
+        }
+        return false
+    }
+
+    private static func isHostFallbackStrategy(_ value: String) -> Bool {
+        value.contains("_host_fallback")
     }
 
     private static func buildVisualSummary(_ context: [String: Any], metadata: [String: String]) -> String {
@@ -213,6 +378,67 @@ enum PanelStateWriter {
     private static func clearSelectionIntent() {
         if FileManager.default.fileExists(atPath: selectionIntentURL.path) {
             try? FileManager.default.removeItem(at: selectionIntentURL)
+        }
+    }
+
+    private static func normalizeVideoContext(_ value: [String: Any]?) -> [String: Any]? {
+        guard let value else {
+            return nil
+        }
+
+        let keys = [
+            "platform",
+            "pageKind",
+            "mediaId",
+            "canonicalUrl",
+            "title",
+            "author",
+            "duration",
+            "description",
+            "postText",
+            "transcriptText",
+            "transcriptLanguage",
+            "transcriptAvailability",
+            "transcriptReason",
+            "transcriptSource",
+            "summaryInputSource",
+            "summaryText",
+            "fallbackDetail",
+            "summaryReady",
+            "summaryMode",
+            "detectedAt",
+        ]
+
+        var result: [String: Any] = [:]
+        for key in keys {
+            if key == "summaryReady" {
+                if let boolValue = value[key] as? Bool {
+                    result[key] = boolValue
+                } else {
+                    let normalized = String(describing: value[key] ?? "").lowercased()
+                    result[key] = normalized == "true"
+                }
+            } else {
+                result[key] = String(describing: value[key] ?? "")
+            }
+        }
+        return result
+    }
+
+    private static func summarySourceRank(_ value: String) -> Int {
+        switch value {
+        case "transcript":
+            return 4
+        case "official_summary":
+            return 3
+        case "chapter_points":
+            return 2
+        case "page_text":
+            return 1
+        case "metadata_only":
+            return 0
+        default:
+            return -1
         }
     }
 }

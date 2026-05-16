@@ -278,7 +278,7 @@ async function loadProtocolModule() {
     typeof browser?.runtime?.getURL === "function"
       ? browser.runtime.getURL.bind(browser.runtime)
       : (path) => path;
-  return import(runtimeGetURL("protocol.js"));
+  return import(runtimeGetURL("shared/protocol.js"));
 }
 
 function scheduleLoginPoll() {

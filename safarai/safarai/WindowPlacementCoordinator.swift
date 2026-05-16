@@ -192,8 +192,7 @@ enum WindowPlacementCoordinator {
 
         for item in infoList {
             guard
-                let owner  = item[kCGWindowOwnerName as String] as? String,
-                owner == "Safari",
+                isSafariWindowOwner(item),
                 let bounds = item[kCGWindowBounds as String] as? [String: CGFloat],
                 let x      = bounds["X"],
                 let y      = bounds["Y"],
@@ -208,6 +207,21 @@ enum WindowPlacementCoordinator {
         }
 
         return nil
+    }
+
+    private static func isSafariWindowOwner(_ item: [String: Any]) -> Bool {
+        if let ownerPID = item[kCGWindowOwnerPID as String] as? pid_t,
+           let app = NSRunningApplication(processIdentifier: ownerPID),
+           app.bundleIdentifier == "com.apple.Safari" {
+            return true
+        }
+
+        if let ownerName = item[kCGWindowOwnerName as String] as? String,
+           ownerName == "Safari" || ownerName.contains("Safari浏览器") {
+            return true
+        }
+
+        return false
     }
 
     private static func appKitGlobalMaxY() -> CGFloat {

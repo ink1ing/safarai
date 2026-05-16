@@ -16,34 +16,57 @@ observeSystemAppearance();
 
 scheduleBootstrapSync("startup");
 
-browser.runtime.onMessage.addListener((message) => {
-  switch (message?.type) {
-    case "content:get-page-context":
-      return handleGetPageContext();
-    case "content:prepare-focused-input":
-      return handlePrepareFocusedInput();
-    case "content:apply-draft":
-      return handleApplyDraft(message.payload?.draft);
-    case "content:highlight-target":
-      return handleInteractiveTargetCommand("highlight", message.payload);
-    case "content:focus-target":
-      return handleInteractiveTargetCommand("focus", message.payload);
-    case "content:scroll-to-target":
-      return handleInteractiveTargetCommand("scroll", message.payload);
-    case "content:click-target":
-      return handleClickTarget(message.payload);
-    case "content:read-target":
-      return handleReadTarget(message.payload);
-    case "content:fill-target":
-      return handleFillTarget(message.payload);
-    case "content:navigate-page":
-      return handleNavigatePage(message.payload);
-    case "content:trigger-sync":
-      scheduleBootstrapSync("background-trigger");
-      return handleGetPageContext();
-    default:
-      return undefined;
+browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  const handleMessage = () => {
+    switch (message?.type) {
+      case "content:get-page-context":
+        return handleGetPageContext();
+      case "content:resolve-video-context":
+        return handleResolveVideoContext(message.payload);
+      case "content:prepare-focused-input":
+        return handlePrepareFocusedInput();
+      case "content:apply-draft":
+        return handleApplyDraft(message.payload?.draft);
+      case "content:highlight-target":
+        return handleInteractiveTargetCommand("highlight", message.payload);
+      case "content:focus-target":
+        return handleInteractiveTargetCommand("focus", message.payload);
+      case "content:scroll-to-target":
+        return handleInteractiveTargetCommand("scroll", message.payload);
+      case "content:click-target":
+        return handleClickTarget(message.payload);
+      case "content:read-target":
+        return handleReadTarget(message.payload);
+      case "content:fill-target":
+        return handleFillTarget(message.payload);
+      case "content:navigate-page":
+        return handleNavigatePage(message.payload);
+      case "content:trigger-sync":
+        scheduleBootstrapSync("background-trigger");
+        return handleGetPageContext();
+      default:
+        return undefined;
+    }
+  };
+
+  if (typeof sendResponse !== "function") {
+    return handleMessage();
   }
+
+  Promise.resolve()
+    .then(handleMessage)
+    .then((response) => sendResponse(response))
+    .catch((error) => {
+      sendResponse({
+        ok: false,
+        error: {
+          code: "content_handler_failed",
+          message: error?.message || String(error),
+        },
+      });
+    });
+
+  return true;
 });
 
 document.addEventListener("selectionchange", () => {
@@ -114,10 +137,51 @@ function handleGetPageContext() {
       });
     } catch (error) {
       return createSuccessResponseLite({
-        context: buildLightweightPageContext(),
+        context: await buildLightweightPageContext(),
         degraded: true,
         warning: `页面解析已降级：${error.message}`,
       });
+    }
+  })();
+}
+
+function handleResolveVideoContext(payload = {}) {
+  return (async () => {
+    try {
+      const {
+        applyResolvedVideoContext,
+        createErrorResponse,
+        createSuccessResponse,
+        resolveVideoContext,
+      } = await sharedModulesPromise;
+      const baseContext = await extractContextSnapshot();
+      const resolvedVideoContext = await resolveVideoContext(
+        window,
+        document,
+        payload.currentVideoContext ?? baseContext.videoContext ?? null
+      );
+      if (!resolvedVideoContext) {
+        return createErrorResponse("video_context_unavailable", "当前页面不是受支持的视频页面。");
+      }
+
+      const nextContext = applyResolvedVideoContext(baseContext, resolvedVideoContext);
+      interactiveTargetIndex = nextContext.__interactiveTargetIndex ?? interactiveTargetIndex;
+      latestInteractiveTargets = Array.isArray(nextContext.interactiveTargets)
+        ? nextContext.interactiveTargets
+        : latestInteractiveTargets;
+
+      browser.runtime.sendMessage({
+        type: "content:page-updated",
+        payload: { context: nextContext },
+      }).catch(() => { });
+
+      return createSuccessResponse({
+        context: nextContext,
+        videoContext: resolvedVideoContext,
+      });
+    } catch (error) {
+      const { createErrorResponse } = await sharedModulesPromise;
+      return createErrorResponse("video_context_resolve_failed", error?.message || "视频上下文解析失败。");
     }
   })();
 }
@@ -361,7 +425,7 @@ function queueContextSync() {
         browser.runtime.sendMessage({
           type: "content:page-updated",
           payload: { context },
-        }).catch(() => {});
+        }).catch(() => { });
       } catch {
         // Ignore transient DOM read failures during page bootstrap.
       }
@@ -399,7 +463,7 @@ function syncStableSelection() {
       url: window.location.href,
       selection,
     },
-  }).catch(() => {});
+  }).catch(() => { });
 }
 
 function patchHistoryMethods() {
@@ -426,7 +490,7 @@ async function extractContextSnapshot() {
     const { extractPageContext } = await sharedModulesPromise;
     context = await extractPageContext(window, document);
   } catch {
-    context = buildLightweightPageContext();
+    context = await buildLightweightPageContext();
   }
   const liveSelection = String(window.getSelection?.()?.toString?.() ?? "").trim();
   const selection = String(context.selection || "").trim();
@@ -455,9 +519,9 @@ async function loadSharedModules() {
       ? browser.runtime.getURL.bind(browser.runtime)
       : (path) => path;
   const [protocolModule, pageContextModule, writeTargetModule] = await Promise.all([
-    import(runtimeGetURL("protocol.js")),
-    import(runtimeGetURL("page-context.js")),
-    import(runtimeGetURL("write-target.js")),
+    import(runtimeGetURL("shared/protocol.js")),
+    import(runtimeGetURL("shared/page-context.js")),
+    import(runtimeGetURL("shared/write-target.js")),
   ]);
 
   return {
@@ -474,31 +538,42 @@ function createSuccessResponseLite(payload = {}) {
   };
 }
 
-function buildLightweightPageContext() {
+async function buildLightweightPageContext() {
   const visual = extractVisualStateLite();
   const hostname = window.location.hostname || "";
   const pathname = window.location.pathname || "";
   const selection = String(window.getSelection?.()?.toString?.() ?? "").trim();
   const title = document.title || "Untitled";
+  const site = detectSiteLite(hostname);
+  const pageKind = inferPageKindLite(hostname, pathname);
   const mainText =
     normalizeLiteText(document.querySelector("main")?.innerText) ||
     normalizeLiteText(document.querySelector("article")?.innerText) ||
     "";
+  const articleText = mainText || `title: ${title}\nurl: ${window.location.href}`;
 
   return {
-    site: detectSiteLite(hostname),
+    site,
     url: window.location.href,
     title,
     selection,
-    articleText: mainText || `title: ${title}\nurl: ${window.location.href}`,
+    articleText,
     structureSummary: "",
     interactiveSummary: "",
     interactiveTargets: [],
     focusedInput: null,
+    videoContext: null,
     metadata: {
       domain: hostname,
-      pageKind: inferPageKindLite(hostname, pathname),
+      pageKind,
       contentStrategy: "lightweight_visual_probe",
+      transcriptAvailable: "",
+      transcriptSource: "",
+      transcriptStatus: "",
+      transcriptDetail: "",
+      summaryReady: "",
+      summaryInputSource: "",
+      fallbackDetail: "",
       pageBackgroundColor: visual.backgroundColor,
       pageBackgroundImage: visual.backgroundImage,
       pageColorScheme: visual.colorScheme,
@@ -579,6 +654,7 @@ function detectSiteLite(hostname) {
 function inferPageKindLite(hostname, pathname) {
   const site = detectSiteLite(hostname);
   if (site === "x") {
+    if (/\/status\/\d+/.test(pathname) && document.querySelector("[data-testid='videoPlayer'], [data-testid='videoComponent'], video")) return "x_video_post";
     if (/\/status\/\d+/.test(pathname)) return "x_post";
     if (pathname === "/home") return "x_home";
   }
