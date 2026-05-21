@@ -40,7 +40,8 @@ final class CodexResponseService {
         prompt: String,
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
-        selectedFocus: String = ""
+        selectedFocus: String = "",
+        taskIntent: String = ""
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -54,6 +55,7 @@ final class CodexResponseService {
                         context: context,
                         history: history,
                         selectedFocus: selectedFocus,
+                        taskIntent: taskIntent,
                         configuration: configuration,
                         attempt: 0,
                         continuation: continuation
@@ -73,6 +75,7 @@ final class CodexResponseService {
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
         selectedFocus: String,
+        taskIntent: String,
         configuration: CodexAccountConfiguration,
         attempt: Int,
         continuation: AsyncThrowingStream<String, Error>.Continuation
@@ -82,6 +85,7 @@ final class CodexResponseService {
             context: context,
             history: history,
             selectedFocus: selectedFocus,
+            taskIntent: taskIntent,
             model: configuration.model.selected
         )
 
@@ -115,6 +119,7 @@ final class CodexResponseService {
                 context: context,
                 history: history,
                 selectedFocus: selectedFocus,
+                taskIntent: taskIntent,
                 configuration: configuration,
                 attempt: attempt + 1,
                 continuation: continuation
@@ -228,6 +233,7 @@ final class CodexResponseService {
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
         selectedFocus: String,
+        taskIntent: String,
         model: String
     ) -> [String: Any] {
         let instructions = appendCustomSystemPrompt(
@@ -252,6 +258,10 @@ final class CodexResponseService {
                 sections.append("interactive_summary:\n\(interactiveSummary)")
             }
             if !context.articleText.isEmpty { sections.append("article_text:\n\(context.articleText)") }
+            if let videoRAGSummary = context.videoRAGSummary, !videoRAGSummary.isEmpty {
+                sections.append("video_rag_signals:\n\(videoRAGSummary)")
+            }
+            appendVideoTranscript(context, to: &sections)
         }
 
         if !history.isEmpty {
@@ -260,6 +270,7 @@ final class CodexResponseService {
         }
 
         sections.append("user_prompt: \(prompt)")
+        appendTaskIntent(taskIntent, context: context, to: &sections)
         let finalPrompt = sections.joined(separator: "\n\n")
 
         return [
@@ -278,5 +289,40 @@ final class CodexResponseService {
             "reasoning": ["effort": "medium", "summary": "auto"],
             "include": ["reasoning.encrypted_content"],
         ]
+    }
+
+    private func appendVideoTranscript(_ context: PanelContextSnapshot, to sections: inout [String]) {
+        guard let transcript = context.videoTranscript, !transcript.isEmpty else { return }
+        let lines = transcript.prefix(240).map { segment in
+            let end = segment.endSeconds.map { "-\(formatTimestamp($0))" } ?? ""
+            return "[\(segment.timestamp)\(end)] \(segment.text)"
+        }
+        sections.append("video_transcript:\n\(lines.joined(separator: "\n"))")
+    }
+
+    private func appendTaskIntent(_ taskIntent: String, context: PanelContextSnapshot?, to sections: inout [String]) {
+        guard taskIntent == "summarize_video" else { return }
+        let transcriptCount = context?.videoTranscript?.count ?? 0
+        sections.append("""
+task_intent: summarize_video
+output_requirements:
+	- 用 Markdown 输出三个部分：## 整体概览、## 时间线要点、## 适合快速记住的结论。
+	- 时间线要点必须引用可用时间戳，格式如 00:00-02:15：要点。
+	- 融合页面结构、视频标题/描述、章节/重要时刻、评论高信号和字幕；评论区只作为“集体注意力信号”，不要把评论当成视频事实。
+	- 不要编造字幕或页面中没有的信息。
+- 如果 video_transcript 为空，必须先写“未检测到可用时间戳字幕”，再仅基于标题、简介、可见页面信息做简短总结。
+video_transcript_count: \(transcriptCount)
+""")
+    }
+
+    private func formatTimestamp(_ value: Double) -> String {
+        let seconds = max(0, Int(value.rounded()))
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        let remaining = seconds % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
+        }
+        return String(format: "%02d:%02d", minutes, remaining)
     }
 }

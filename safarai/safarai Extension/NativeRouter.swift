@@ -2,12 +2,39 @@ import AppKit
 import Foundation
 
 enum NativeRouter {
+    private static let maxNativeMessageBytes = 4 * 1024 * 1024
+    private static let controlRequestTypes: Set<String> = [
+        "get_status",
+        "start_login",
+        "logout",
+        "refresh_models",
+        "save_selected_model",
+        "show_panel",
+        "sync_panel_state",
+        "sync_selection_intent",
+    ]
+    private static let providerRequestTypes: Set<String> = [
+        "summarize_page",
+        "explain_selection",
+        "extract_structured_info",
+        "draft_for_input",
+        "ask_page",
+    ]
+
     static func route(message: Any?) -> [String: Any] {
         guard
             let payload = message as? [String: Any],
             let type = payload["type"] as? String
         else {
             return MockNativeRouter.error(code: "invalid_request", message: "native message payload 无效")
+        }
+
+        guard controlRequestTypes.contains(type) || providerRequestTypes.contains(type) else {
+            return MockNativeRouter.error(code: "unsupported_request", message: "native message type 不允许")
+        }
+
+        guard isReasonablePayload(payload) else {
+            return MockNativeRouter.error(code: "payload_too_large", message: "native message payload 过大或格式无效")
         }
 
         let requestId = payload["id"] as? String ?? "req_missing"
@@ -119,6 +146,9 @@ enum NativeRouter {
                 ],
             ]
         default:
+            guard providerRequestTypes.contains(type) else {
+                return MockNativeRouter.error(code: "unsupported_request", message: "native message type 不允许")
+            }
             let client = LocalProviderClient(config: config)
             do {
                 return try client.run(requestType: type, context: context, requestId: requestId)
@@ -150,6 +180,15 @@ enum NativeRouter {
                 "loginInProgress": NativeCodexOAuthService.shared.currentStatus(reasoningEffort: "medium").loginInProgress,
             ],
         ]
+    }
+
+    private static func isReasonablePayload(_ payload: [String: Any]) -> Bool {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload)
+        else {
+            return false
+        }
+        return data.count <= maxNativeMessageBytes
     }
 
     private static func openCodexLoginURL() throws {

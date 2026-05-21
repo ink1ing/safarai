@@ -7,12 +7,21 @@ let lastStableSelectionURL = window.location.href;
 let contextSyncTimer = null;
 let bootstrapSyncToken = 0;
 let bootstrapSyncTimers = [];
+let platformTranscriptCacheURL = "";
+let platformTranscriptCache = [];
+let platformTranscriptCacheUpdatedAt = 0;
 const sharedModulesPromise = loadSharedModules();
 const BOOTSTRAP_SYNC_DELAYS = [0, 180, 600, 1400, 2600, 4200];
+const MAX_PLATFORM_TRANSCRIPT_SEGMENTS = 240;
+const MAX_PLATFORM_TRANSCRIPT_TEXT_LENGTH = 360;
+const PLATFORM_TRANSCRIPT_EMPTY_RETRY_MS = 5000;
+const VIDEO_FRAME_SAMPLE_LIMIT = 8;
+const VIDEO_FRAME_SAMPLE_SETTLE_MS = 950;
 
 patchHistoryMethods();
 observeVisualChanges();
 observeSystemAppearance();
+installSafariAppExtensionBridge();
 
 scheduleBootstrapSync("startup");
 
@@ -33,6 +42,8 @@ browser.runtime.onMessage.addListener((message) => {
     case "content:trigger-sync":
       scheduleBootstrapSync("background-trigger");
       return handleGetPageContext();
+    case "content:prepare-video-frame-sample":
+      return handlePrepareVideoFrameSample(message.payload);
     default:
       return undefined;
   }
@@ -247,6 +258,52 @@ function handleInteractiveTargetCommand(action, payload = {}) {
   })();
 }
 
+function handlePrepareVideoFrameSample(payload = {}) {
+  return (async () => {
+    const video = findPrimaryVideoElement();
+    if (!video) {
+      return createSuccessResponseLite({
+        prepared: false,
+        reason: "video_not_found",
+      });
+    }
+
+    const duration = normalizePositiveNumber(video.duration);
+    const requestedTime = normalizePositiveNumber(payload.timeSeconds);
+    const targetTime = clampVideoSampleTime(requestedTime ?? 0, duration);
+    const wasPaused = video.paused;
+    const originalMuted = video.muted;
+
+    try {
+      video.pause?.();
+      video.muted = true;
+      if (Number.isFinite(targetTime)) {
+        await seekVideoTo(video, targetTime);
+      }
+      await waitForVideoFrame(video);
+      video.scrollIntoView?.({ block: "center", inline: "center", behavior: "instant" });
+      await delay(VIDEO_FRAME_SAMPLE_SETTLE_MS);
+      return createSuccessResponseLite({
+        prepared: true,
+        timestamp: formatTimestamp(video.currentTime || targetTime || 0),
+        timeSeconds: Math.round(video.currentTime || targetTime || 0),
+        durationSeconds: duration == null ? null : Math.round(duration),
+        wasPaused,
+      });
+    } catch (error) {
+      return createSuccessResponseLite({
+        prepared: false,
+        reason: error?.message || String(error),
+      });
+    } finally {
+      video.muted = originalMuted;
+      if (!wasPaused) {
+        video.play?.().catch?.(() => {});
+      }
+    }
+  })();
+}
+
 function queueContextSync() {
   if (contextSyncTimer) {
     clearTimeout(contextSyncTimer);
@@ -254,19 +311,44 @@ function queueContextSync() {
 
   contextSyncTimer = setTimeout(() => {
     contextSyncTimer = null;
-    (async () => {
-      try {
-        lastKnownURL = window.location.href;
-        const context = await extractContextSnapshot();
-        browser.runtime.sendMessage({
-          type: "content:page-updated",
-          payload: { context },
-        }).catch(() => {});
-      } catch {
-        // Ignore transient DOM read failures during page bootstrap.
-      }
-    })();
+    syncContextNow("queued").catch(() => {});
   }, 120);
+}
+
+async function syncContextNow(reason = "") {
+  try {
+    lastKnownURL = window.location.href;
+    const context = await extractContextSnapshot();
+    context.metadata = {
+      ...(context.metadata ?? {}),
+      pageContextSyncReason: String(reason || ""),
+    };
+    await browser.runtime.sendMessage({
+      type: "content:page-updated",
+      payload: { context },
+    }).catch(() => {});
+  } catch {
+    // Ignore transient DOM read failures during page bootstrap.
+  }
+}
+
+function installSafariAppExtensionBridge() {
+  const safariSelf = globalThis.safari?.self;
+  if (!safariSelf?.addEventListener) {
+    return;
+  }
+
+  safariSelf.addEventListener("message", (event) => {
+    const name = event?.name || event?.message?.name || "";
+    if (name === "refresh-active-page-context") {
+      scheduleBootstrapSync("containing-app-request");
+      syncContextNow("containing-app-request").catch(() => {});
+    } else if (name === "sample-active-video-frames") {
+      browser.runtime.sendMessage({
+        type: "content:sample-video-frames",
+      }).catch(() => {});
+    }
+  });
 }
 
 function scheduleBootstrapSync(_reason = "") {
@@ -332,6 +414,7 @@ async function extractContextSnapshot() {
   } catch {
     context = buildLightweightPageContext();
   }
+  context = await enrichContextWithPlatformTranscript(context);
   const liveSelection = String(window.getSelection?.()?.toString?.() ?? "").trim();
   const selection = String(context.selection || "").trim();
   if (selection) {
@@ -356,6 +439,85 @@ async function extractContextSnapshot() {
     contentSelectionURL: truncateDebugValue(lastStableSelectionURL),
   };
   return context;
+}
+
+function findPrimaryVideoElement() {
+  const videos = Array.from(document.querySelectorAll?.("video") || []);
+  if (!videos.length) {
+    return null;
+  }
+  return videos
+    .map((video, index) => {
+      const rect = video.getBoundingClientRect?.() || { width: 0, height: 0 };
+      const area = Math.max(0, rect.width || 0) * Math.max(0, rect.height || 0);
+      return { video, index, area };
+    })
+    .filter((item) => item.area > 0)
+    .sort((left, right) => right.area - left.area || left.index - right.index)[0]?.video ?? videos[0];
+}
+
+function normalizePositiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function clampVideoSampleTime(value, duration) {
+  const time = normalizePositiveNumber(value) ?? 0;
+  if (duration == null || duration <= 0) {
+    return time;
+  }
+  return Math.min(Math.max(0.1, time), Math.max(0.1, duration - 0.4));
+}
+
+function seekVideoTo(video, timeSeconds) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("video_seek_failed"));
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      video.removeEventListener?.("seeked", finish);
+      video.removeEventListener?.("error", fail);
+    };
+    const timeout = setTimeout(finish, 1800);
+    video.addEventListener?.("seeked", finish, { once: true });
+    video.addEventListener?.("error", fail, { once: true });
+    try {
+      video.currentTime = timeSeconds;
+      if (Math.abs((video.currentTime || 0) - timeSeconds) < 0.2) {
+        setTimeout(finish, 120);
+      }
+    } catch {
+      fail();
+    }
+  });
+}
+
+function waitForVideoFrame(video) {
+  if (typeof video.requestVideoFrameCallback === "function") {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(resolve, 900);
+      video.requestVideoFrameCallback(() => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  }
+  return delay(600);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function loadSharedModules() {
@@ -383,6 +545,417 @@ function createSuccessResponseLite(payload = {}) {
   };
 }
 
+async function enrichContextWithPlatformTranscript(context) {
+  if (!shouldFetchPlatformTranscript(context)) {
+    return context;
+  }
+
+  const transcript = await loadPlatformTranscript(context);
+  if (!transcript.length) {
+    context.metadata = {
+      ...(context.metadata ?? {}),
+      platformTranscriptStatus:
+        context.metadata?.platformTranscriptStatus || "unavailable",
+    };
+    return context;
+  }
+
+  context.videoTranscript = transcript;
+  context.metadata = {
+    ...(context.metadata ?? {}),
+    videoTranscriptCount: String(transcript.length),
+    videoTranscriptSource: transcript[0]?.source || "platform_caption",
+    hasTranscript: "true",
+    platformTranscriptStatus: "loaded",
+  };
+  context.articleText = mergeTranscriptIntoArticleText(context.articleText, transcript);
+  return context;
+}
+
+function shouldFetchPlatformTranscript(context) {
+  const metadata = context?.metadata ?? {};
+  const transcript = Array.isArray(context?.videoTranscript) ? context.videoTranscript : [];
+  const pageKind = String(metadata.pageKind || "");
+  const site = String(context?.site || "");
+  if (transcript.length >= 3) {
+    return false;
+  }
+  return (
+    pageKind === "youtube_video" ||
+    pageKind === "bilibili_video" ||
+    (metadata.hasPrimaryVideo === "true" && (site === "youtube" || site === "bilibili"))
+  );
+}
+
+async function loadPlatformTranscript(context) {
+  const url = String(context?.url || window.location.href || "");
+  const cacheAge = Date.now() - platformTranscriptCacheUpdatedAt;
+  if (platformTranscriptCacheURL === url && platformTranscriptCache.length) {
+    return platformTranscriptCache;
+  }
+  if (
+    platformTranscriptCacheURL === url &&
+    !platformTranscriptCache.length &&
+    cacheAge >= 0 &&
+    cacheAge < PLATFORM_TRANSCRIPT_EMPTY_RETRY_MS
+  ) {
+    return [];
+  }
+
+  platformTranscriptCacheURL = url;
+  platformTranscriptCache = [];
+  platformTranscriptCacheUpdatedAt = Date.now();
+
+  const site = String(context?.site || "");
+  const transcript =
+    site === "youtube"
+      ? await fetchYouTubeTranscript()
+      : site === "bilibili"
+        ? await fetchBilibiliTranscript()
+        : [];
+
+  platformTranscriptCache = normalizeTranscriptSegments(transcript);
+  platformTranscriptCacheUpdatedAt = Date.now();
+  return platformTranscriptCache;
+}
+
+function mergeTranscriptIntoArticleText(articleText, transcript) {
+  const baseText = String(articleText || "").trim();
+  const transcriptText = transcript
+    .slice(0, 80)
+    .map((segment) => `${segment.timestamp} ${segment.text}`)
+    .join("\n");
+  if (!transcriptText) {
+    return baseText;
+  }
+  if (baseText.includes("video_transcript_or_visible_subtitles:")) {
+    return baseText;
+  }
+  return `${baseText}\n\nvideo_transcript_or_visible_subtitles:\n${transcriptText}`.trim().slice(0, 12000);
+}
+
+async function fetchYouTubeTranscript() {
+  const playerResponse = findYouTubePlayerResponse();
+  const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+  const sortedTracks = [...tracks].sort(compareYouTubeCaptionTracks);
+
+  for (const track of sortedTracks) {
+    const baseURL = String(track?.baseUrl || "");
+    if (!baseURL) {
+      continue;
+    }
+    const url = withYouTubeTranscriptFormat(baseURL);
+    try {
+      const text = await fetchTranscriptText(url);
+      const transcript = parseYouTubeTranscriptPayload(text);
+      if (transcript.length) {
+        return transcript.map((segment) => ({
+          ...segment,
+          source: track.kind === "asr" ? "youtube_auto_caption" : "youtube_caption",
+        }));
+      }
+    } catch {
+      // Try the next caption track.
+    }
+  }
+
+  return [];
+}
+
+function findYouTubePlayerResponse() {
+  const direct = globalThis.ytInitialPlayerResponse;
+  if (direct?.captions) {
+    return direct;
+  }
+
+  for (const script of Array.from(document.scripts || [])) {
+    const text = script.textContent || "";
+    const marker = "ytInitialPlayerResponse";
+    const markerIndex = text.indexOf(marker);
+    if (markerIndex === -1) {
+      continue;
+    }
+    const equalsIndex = text.indexOf("=", markerIndex);
+    if (equalsIndex === -1) {
+      continue;
+    }
+    const jsonText = extractBalancedJSON(text, text.indexOf("{", equalsIndex));
+    if (!jsonText) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (parsed?.captions) {
+        return parsed;
+      }
+    } catch {
+      // Continue scanning scripts.
+    }
+  }
+
+  return null;
+}
+
+function compareYouTubeCaptionTracks(left, right) {
+  const leftScore = scoreYouTubeCaptionTrack(left);
+  const rightScore = scoreYouTubeCaptionTrack(right);
+  return rightScore - leftScore;
+}
+
+function scoreYouTubeCaptionTrack(track) {
+  const language = String(track?.languageCode || "").toLowerCase();
+  const name = JSON.stringify(track?.name || {}).toLowerCase();
+  let score = 0;
+  if (language.startsWith(navigator.language?.slice(0, 2).toLowerCase() || "")) score += 30;
+  if (language.startsWith("zh")) score += 20;
+  if (language.startsWith("en")) score += 15;
+  if (track?.kind !== "asr") score += 10;
+  if (name.includes("default")) score += 5;
+  return score;
+}
+
+function withYouTubeTranscriptFormat(baseURL) {
+  try {
+    const url = new URL(baseURL);
+    url.searchParams.set("fmt", "json3");
+    return url.toString();
+  } catch {
+    return baseURL.includes("fmt=")
+      ? baseURL
+      : `${baseURL}${baseURL.includes("?") ? "&" : "?"}fmt=json3`;
+  }
+}
+
+function parseYouTubeTranscriptPayload(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  try {
+    const json = JSON.parse(trimmed);
+    const events = Array.isArray(json?.events) ? json.events : [];
+    return events
+      .map((event) => {
+        const text = Array.isArray(event.segs)
+          ? event.segs.map((seg) => seg?.utf8 || "").join("")
+          : "";
+        return makeTranscriptSegmentFromMilliseconds(
+          event.tStartMs,
+          event.dDurationMs == null ? null : Number(event.tStartMs || 0) + Number(event.dDurationMs || 0),
+          text,
+          "youtube_caption"
+        );
+      })
+      .filter(Boolean);
+  } catch {
+    return parseYouTubeTranscriptXML(trimmed);
+  }
+}
+
+function parseYouTubeTranscriptXML(text) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, "text/xml");
+  return Array.from(doc.querySelectorAll("text"))
+    .map((node) =>
+      makeTranscriptSegment(
+        Number.parseFloat(node.getAttribute("start") || "0"),
+        node.getAttribute("dur") == null
+          ? null
+          : Number.parseFloat(node.getAttribute("start") || "0") + Number.parseFloat(node.getAttribute("dur") || "0"),
+        node.textContent || "",
+        "youtube_caption"
+      )
+    )
+    .filter(Boolean);
+}
+
+async function fetchBilibiliTranscript() {
+  const subtitleURLs = findBilibiliSubtitleURLs();
+  for (const url of subtitleURLs) {
+    try {
+      const payload = JSON.parse(await fetchTranscriptText(url));
+      const items = Array.isArray(payload?.body) ? payload.body : [];
+      const transcript = items
+        .map((item) =>
+          makeTranscriptSegment(
+            Number(item.from ?? item.start ?? 0),
+            item.to == null ? null : Number(item.to),
+            item.content || item.text || "",
+            "bilibili_subtitle_json"
+          )
+        )
+        .filter(Boolean);
+      if (transcript.length) {
+        return transcript;
+      }
+    } catch {
+      // Try the next subtitle URL.
+    }
+  }
+  return [];
+}
+
+async function fetchTranscriptText(url) {
+  try {
+    const response = await fetch(url, { credentials: "include" });
+    if (response.ok) {
+      return response.text();
+    }
+  } catch {
+    // Fall back to the extension background request below.
+  }
+
+  const response = await browser.runtime.sendMessage({
+    type: "content:fetch-transcript-url",
+    payload: { url },
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error?.message || "transcript fetch failed");
+  }
+  return String(response.payload?.text || "");
+}
+
+function findBilibiliSubtitleURLs() {
+  const urls = new Set();
+  const addSubtitleURL = (value) => {
+    const text = String(value || "").trim();
+    if (!text) {
+      return;
+    }
+    try {
+      urls.add(new URL(text, window.location.href).toString());
+    } catch {
+      // Ignore malformed subtitle URLs.
+    }
+  };
+
+  collectSubtitleURLs(globalThis.__INITIAL_STATE__, addSubtitleURL);
+  collectSubtitleURLs(globalThis.__playinfo__, addSubtitleURL);
+
+  for (const script of Array.from(document.scripts || [])) {
+    const text = script.textContent || "";
+    if (!text.includes("subtitle")) {
+      continue;
+    }
+    for (const match of text.matchAll(/"subtitle_url"\s*:\s*"([^"]+)"/g)) {
+      addSubtitleURL(match[1].replace(/\\u002F/g, "/").replace(/\\\//g, "/"));
+    }
+  }
+
+  return Array.from(urls);
+}
+
+function collectSubtitleURLs(value, addSubtitleURL, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) {
+    return;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectSubtitleURLs(item, addSubtitleURL, seen);
+    }
+    return;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "subtitle_url" || key === "subtitleUrl") {
+      addSubtitleURL(child);
+    } else {
+      collectSubtitleURLs(child, addSubtitleURL, seen);
+    }
+  }
+}
+
+function extractBalancedJSON(text, startIndex) {
+  if (startIndex < 0) {
+    return "";
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(startIndex, index + 1);
+      }
+    }
+  }
+  return "";
+}
+
+function normalizeTranscriptSegments(segments) {
+  const seen = new Set();
+  return (segments || [])
+    .filter((segment) => segment && segment.text && segment.startSeconds != null)
+    .sort((left, right) => left.startSeconds - right.startSeconds)
+    .filter((segment) => {
+      const key = `${Math.round(segment.startSeconds)}:${segment.text}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_PLATFORM_TRANSCRIPT_SEGMENTS);
+}
+
+function makeTranscriptSegmentFromMilliseconds(startMs, endMs, text, source) {
+  const startSeconds = Number(startMs) / 1000;
+  const endSeconds = endMs == null ? null : Number(endMs) / 1000;
+  return makeTranscriptSegment(startSeconds, endSeconds, text, source);
+}
+
+function makeTranscriptSegment(startSeconds, endSeconds, text, source) {
+  const cleanText = decodeTranscriptText(normalizeLiteText(text).slice(0, MAX_PLATFORM_TRANSCRIPT_TEXT_LENGTH));
+  if (!cleanText) {
+    return null;
+  }
+  const normalizedStart = Math.max(0, Math.round(Number(startSeconds) || 0));
+  const normalizedEnd = endSeconds == null ? null : Math.max(normalizedStart, Math.round(Number(endSeconds) || 0));
+  return {
+    startSeconds: normalizedStart,
+    ...(normalizedEnd == null ? {} : { endSeconds: normalizedEnd }),
+    timestamp: formatTimestamp(normalizedStart),
+    text: cleanText,
+    source,
+  };
+}
+
+function decodeTranscriptText(text) {
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = String(text || "");
+  return normalizeLiteText(textarea.value);
+}
+
+function formatTimestamp(totalSeconds) {
+  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const two = (value) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${two(minutes)}:${two(remainingSeconds)}`
+    : `${two(minutes)}:${two(remainingSeconds)}`;
+}
+
 function buildLightweightPageContext() {
   const visual = extractVisualStateLite();
   const hostname = window.location.hostname || "";
@@ -400,10 +973,13 @@ function buildLightweightPageContext() {
     title,
     selection,
     articleText: mainText || `title: ${title}\nurl: ${window.location.href}`,
+    videoRAGSummary: "",
     structureSummary: "",
     interactiveSummary: "",
     interactiveTargets: [],
     focusedInput: null,
+    videoTranscript: [],
+    videoFrameSamples: [],
     metadata: {
       domain: hostname,
       pageKind: inferPageKindLite(hostname, pathname),
@@ -476,6 +1052,12 @@ function detectSiteLite(hostname) {
     return "x";
   }
   if (hostname.includes("mail.yahoo.com")) return "yahoo_mail";
+  if (hostname === "youtube.com" || hostname.endsWith(".youtube.com") || hostname === "youtu.be") {
+    return "youtube";
+  }
+  if (hostname === "bilibili.com" || hostname.endsWith(".bilibili.com")) {
+    return "bilibili";
+  }
   return "unsupported";
 }
 
@@ -488,6 +1070,18 @@ function inferPageKindLite(hostname, pathname) {
   if (site === "github") return "github_page";
   if (site === "gmail") return "gmail_page";
   if (site === "yahoo_mail") return "yahoo_mail_page";
+  if (site === "youtube") {
+    if (pathname === "/watch" || pathname.startsWith("/shorts/") || pathname.startsWith("/live/")) {
+      return "youtube_video";
+    }
+    return "youtube_page";
+  }
+  if (site === "bilibili") {
+    if (/\/video\//.test(pathname) || /\/BV[a-zA-Z0-9]+/.test(pathname)) {
+      return "bilibili_video";
+    }
+    return "bilibili_page";
+  }
   return "page";
 }
 

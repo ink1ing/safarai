@@ -4,3 +4,5 @@
 *.xcuserstate
 **/xcuserdata/
 node_modules/
+
+.build/

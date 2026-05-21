@@ -26,11 +26,23 @@
             "*://mail.google.com/*",
             "*://x.com/*",
             "*://twitter.com/*",
+            "*://www.youtube.com/*",
+            "*://m.youtube.com/*",
+            "*://youtube.com/*",
+            "*://www.bilibili.com/*",
+            "*://m.bilibili.com/*",
+            "*://bilibili.com/*",
             "*://mail.yahoo.com/*",
             "*://*.mail.yahoo.com/*",
             "<all_urls>"
         ]
     }],
+
+    "host_permissions": [
+        "*://*.youtube.com/*",
+        "*://*.hdslb.com/*",
+        "*://*.bilivideo.com/*"
+    ],
 
     "action": {
         "default_icon": "images/toolbar-icon.svg"
@@ -42,6 +54,7 @@
         "nativeMessaging",
         "scripting",
         "storage",
-        "tabs"
+        "tabs",
+        "<all_urls>"
     ]
 }

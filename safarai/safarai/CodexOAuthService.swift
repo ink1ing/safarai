@@ -50,9 +50,9 @@ private struct CodexLoginStateSnapshot: Codable {
 
 private final class CallbackResolutionState: @unchecked Sendable {
     private let lock = NSLock()
-    private var finished = false
+    private nonisolated(unsafe) var finished = false
 
-    func finish(_ action: () -> Void) {
+    nonisolated func finish(_ action: () -> Void) {
         lock.lock()
         defer { lock.unlock() }
 
@@ -219,8 +219,6 @@ final class CodexOAuthService {
     }
 
     private func updateLoginState(inProgress: Bool, stage: String, error: String? = nil) {
-        let directory = loginStateURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let payload = CodexLoginStateSnapshot(
             loginInProgress: inProgress,
             stage: stage,
@@ -230,7 +228,7 @@ final class CodexOAuthService {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(payload) {
-            try? data.write(to: loginStateURL, options: .atomic)
+            try? SharedContainer.writePrivate(data, to: loginStateURL)
         }
     }
 

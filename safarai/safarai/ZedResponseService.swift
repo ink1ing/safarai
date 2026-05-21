@@ -65,7 +65,8 @@ final class ZedResponseService {
         prompt: String,
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
-        selectedFocus: String = ""
+        selectedFocus: String = "",
+        taskIntent: String = ""
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -80,6 +81,7 @@ final class ZedResponseService {
                         context: context,
                         history: history,
                         selectedFocus: selectedFocus,
+                        taskIntent: taskIntent,
                         model: model,
                         configuration: configuration,
                         llmToken: llmToken,
@@ -214,6 +216,7 @@ final class ZedResponseService {
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
         selectedFocus: String,
+        taskIntent: String,
         model: ZedModelSummary,
         configuration: ZedAccountConfiguration,
         llmToken: String,
@@ -223,7 +226,7 @@ final class ZedResponseService {
         let systemPrompt = appendCustomSystemPrompt(
             basePrompt: "你是集成在 Safari 页面里的中文助理。回答必须简洁、准确、面向当前页面任务，不要编造页面中不存在的信息。若有页面选中内容，请优先解释选中内容，再结合整页内容回答。"
         )
-        let finalPrompt = buildPrompt(prompt: prompt, context: context, history: history, selectedFocus: selectedFocus)
+        let finalPrompt = buildPrompt(prompt: prompt, context: context, history: history, selectedFocus: selectedFocus, taskIntent: taskIntent)
 
         let bodyDict: [String: Any] = [
             "provider": model.provider,
@@ -257,6 +260,7 @@ final class ZedResponseService {
                 context: context,
                 history: history,
                 selectedFocus: selectedFocus,
+                taskIntent: taskIntent,
                 model: model,
                 configuration: configuration,
                 llmToken: freshToken,
@@ -347,7 +351,8 @@ final class ZedResponseService {
         prompt: String,
         context: PanelContextSnapshot?,
         history: [PanelConversationMessage],
-        selectedFocus: String
+        selectedFocus: String,
+        taskIntent: String
     ) -> String {
         var sections = [String]()
 
@@ -372,6 +377,10 @@ final class ZedResponseService {
             if !context.articleText.isEmpty {
                 sections.append("article_text:\n\(context.articleText)")
             }
+            if let videoRAGSummary = context.videoRAGSummary, !videoRAGSummary.isEmpty {
+                sections.append("video_rag_signals:\n\(videoRAGSummary)")
+            }
+            appendVideoTranscript(context, to: &sections)
         }
 
         if !history.isEmpty {
@@ -382,7 +391,43 @@ final class ZedResponseService {
         }
 
         sections.append("user_prompt: \(prompt)")
+        appendTaskIntent(taskIntent, context: context, to: &sections)
         return sections.joined(separator: "\n\n")
+    }
+
+    private func appendVideoTranscript(_ context: PanelContextSnapshot, to sections: inout [String]) {
+        guard let transcript = context.videoTranscript, !transcript.isEmpty else { return }
+        let lines = transcript.prefix(240).map { segment in
+            let end = segment.endSeconds.map { "-\(formatTimestamp($0))" } ?? ""
+            return "[\(segment.timestamp)\(end)] \(segment.text)"
+        }
+        sections.append("video_transcript:\n\(lines.joined(separator: "\n"))")
+    }
+
+    private func appendTaskIntent(_ taskIntent: String, context: PanelContextSnapshot?, to sections: inout [String]) {
+        guard taskIntent == "summarize_video" else { return }
+        let transcriptCount = context?.videoTranscript?.count ?? 0
+        sections.append("""
+task_intent: summarize_video
+output_requirements:
+	- 用 Markdown 输出三个部分：## 整体概览、## 时间线要点、## 适合快速记住的结论。
+	- 时间线要点必须引用可用时间戳，格式如 00:00-02:15：要点。
+	- 融合页面结构、视频标题/描述、章节/重要时刻、评论高信号和字幕；评论区只作为“集体注意力信号”，不要把评论当成视频事实。
+	- 不要编造字幕或页面中没有的信息。
+- 如果 video_transcript 为空，必须先写“未检测到可用时间戳字幕”，再仅基于标题、简介、可见页面信息做简短总结。
+video_transcript_count: \(transcriptCount)
+""")
+    }
+
+    private func formatTimestamp(_ value: Double) -> String {
+        let seconds = max(0, Int(value.rounded()))
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        let remaining = seconds % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
+        }
+        return String(format: "%02d:%02d", minutes, remaining)
     }
 
     // MARK: - Provider Request Builder

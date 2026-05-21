@@ -2,17 +2,25 @@ const modelSelect = document.getElementById("model-select");
 const modelDisplay = document.getElementById("model-display");
 const conversationList = document.getElementById("conversation-list");
 const contextURL = document.getElementById("context-url");
+const contextURLRow = document.getElementById("context-url-row");
+const refreshContextURLButton = document.getElementById("refresh-context-url-button");
+const detachContextButton = document.getElementById("detach-context-button");
 const contextSelectionText = document.getElementById("context-selection-text");
 const composerDivider = document.getElementById("composer-divider");
 const questionEditor = document.getElementById("question-editor");
 const askPageButton = document.getElementById("ask-page");
 const historyButton = document.getElementById("refresh-context-button");
 const settingsButton = document.getElementById("settings-button");
+const summarizeVideoButton = document.getElementById("summarize-video-button");
 const settingsCloseButton = document.getElementById("settings-close-button");
 const historyCloseButton = document.getElementById("history-close-button");
 const systemPromptEditor = document.getElementById("sd-system-prompt-editor");
 const saveSystemPromptButton = document.getElementById("sd-save-system-prompt");
 const resetSystemPromptButton = document.getElementById("sd-reset-system-prompt");
+const openAICompatibleSection = document.getElementById("sd-openai-compatible-section");
+const openAICompatibleEndpoint = document.getElementById("sd-openai-compatible-endpoint");
+const openAICompatibleApiKey = document.getElementById("sd-openai-compatible-api-key");
+const openAICompatibleStatus = document.getElementById("sd-openai-compatible-status");
 const contextPreviewURL = document.getElementById("context-preview-url");
 const historyThreadList = document.getElementById("history-thread-list");
 const historyActionMenu = document.getElementById("history-action-menu");
@@ -20,7 +28,9 @@ const newChatButton = document.getElementById("new-chat-button");
 const newChatFooterButton = document.getElementById("new-chat-footer-button");
 const languageButtonEN = document.getElementById("sd-language-en");
 const languageButtonZH = document.getElementById("sd-language-zh");
+const LOCAL_MODEL_SELECTION_KEY = "safarai:last-selected-model";
 let isStreamingResponse = false;
+let isPreparingQuestion = false;
 let currentDrawerState = {
   language: "en",
   theme: "blue",
@@ -34,6 +44,12 @@ let currentThreadId = "";
 let openHistoryMenuThreadId = "";
 let systemPromptSavedValue = "";
 let systemPromptDirty = false;
+let openAICompatibleDraftDirty = false;
+let latestHistoryThreads = [];
+let latestPageVisualMetadata = {};
+let latestPageVisualURL = "";
+let detachedContextURL = "";
+let deleteConfirmThreadId = "";
 
 const I18N = {
   en: {
@@ -41,6 +57,7 @@ const I18N = {
     provider: "AI Provider",
     codex_account: "Codex Account",
     zed_account: "Zed Account",
+    openai_compatible: "OpenAI Compatible",
     theme: "Theme",
     language: "Language",
     page_color: "Page Color",
@@ -49,9 +66,13 @@ const I18N = {
     system_prompt: "System Prompt",
     placement: "Window Placement",
     follow_safari: "Follow Safari",
+    updates: "Updates",
     sign_in: "Sign In",
     sign_out: "Sign Out",
     import_zed: "Import Zed",
+    refresh_models: "Refresh Models",
+    api_key_saved: "API Key saved",
+    api_key_missing: "API Key not saved",
     blue: "Blue",
     orange: "Orange",
     gray: "Gray",
@@ -63,15 +84,18 @@ const I18N = {
     import: "Import",
     export: "Export",
     current_page: "Current Page",
+    safari_extension: "Safari Extension",
     save: "Save",
     remember: "Remember",
     snap_left: "Snap Left",
     snap_right: "Snap Right",
     follow_safari_button: "Follow Safari",
+    check_updates: "Check for Updates",
     history_title: "Chat History",
     explain_page: "Explain Page",
     translate_page: "Translate Page",
     give_suggestions: "Give Suggestions",
+    summarize_video: "Summarize Video",
     default_location: "Default location",
     no_history: "No chat history yet",
     unknown_page: "Unknown page",
@@ -82,6 +106,7 @@ const I18N = {
     delete: "Delete",
     rename_prompt: "Enter a new chat title",
     delete_confirm: "Delete this chat record?",
+    cancel: "Cancel",
     aria_close_settings: "Close settings",
     aria_close_history: "Close chat history",
     aria_history: "Chat history",
@@ -95,6 +120,7 @@ const I18N = {
     provider: "AI 提供商",
     codex_account: "Codex 账户",
     zed_account: "Zed 账户",
+    openai_compatible: "OpenAI 兼容",
     theme: "颜色风格",
     language: "语言",
     page_color: "页面颜色",
@@ -103,9 +129,13 @@ const I18N = {
     system_prompt: "System Prompt",
     placement: "窗口位置",
     follow_safari: "Safari 跟随吸附",
+    updates: "自动更新",
     sign_in: "登录",
     sign_out: "退出",
     import_zed: "导入 Zed",
+    refresh_models: "刷新模型",
+    api_key_saved: "API Key 已保存",
+    api_key_missing: "API Key 未保存",
     blue: "蓝色",
     orange: "橙色",
     gray: "灰色",
@@ -117,15 +147,18 @@ const I18N = {
     import: "导入",
     export: "导出",
     current_page: "当前页面",
+    safari_extension: "Safari 扩展",
     save: "保存",
     remember: "记忆位置",
     snap_left: "左吸附",
     snap_right: "右吸附",
     follow_safari_button: "跟随 Safari",
+    check_updates: "检查更新",
     history_title: "聊天记录",
     explain_page: "解释页面",
     translate_page: "翻译页面",
     give_suggestions: "给出建议",
+    summarize_video: "视频总结",
     default_location: "默认位置",
     no_history: "暂无聊天记录",
     unknown_page: "未知页面",
@@ -136,6 +169,7 @@ const I18N = {
     delete: "删除",
     rename_prompt: "输入新的聊天记录标题",
     delete_confirm: "确定删除这条聊天记录？",
+    cancel: "取消",
     aria_close_settings: "收起设置",
     aria_close_history: "收起聊天记录",
     aria_history: "聊天记录",
@@ -175,6 +209,7 @@ const STOP_ICON = `
 
 modelSelect.addEventListener("change", () => {
   syncSelectedModelDisplay();
+  saveLocalModelSelection(modelSelect.value);
   webkit.messageHandlers.controller.postMessage({
     command: "save-selected-model",
     selectedModel: modelSelect.value,
@@ -209,6 +244,12 @@ systemPromptEditor.addEventListener("input", () => {
   systemPromptDirty = normalizeSystemPrompt(systemPromptEditor.value) !== systemPromptSavedValue;
   syncSystemPromptButtons();
 });
+openAICompatibleEndpoint.addEventListener("input", () => {
+  openAICompatibleDraftDirty = true;
+});
+openAICompatibleApiKey.addEventListener("input", () => {
+  openAICompatibleDraftDirty = true;
+});
 saveSystemPromptButton.addEventListener("click", () => {
   sdPost("save-custom-system-prompt", {
     customSystemPrompt: systemPromptEditor.value,
@@ -222,7 +263,9 @@ for (const pill of document.querySelectorAll(".suggestion-pill[data-prompt]")) {
   pill.addEventListener("click", () => {
     const prompt = pill.dataset.prompt;
     if (prompt) {
-      sendQuestion(prompt);
+      sendQuestion(prompt, {
+        taskIntent: pill.dataset.taskIntent || "",
+      });
     }
   });
 }
@@ -233,6 +276,23 @@ askPageButton.addEventListener("click", () => {
     return;
   }
   sendQuestion();
+});
+refreshContextURLButton.addEventListener("click", () => {
+  detachedContextURL = "";
+  syncDetachedContextStorage();
+  webkit.messageHandlers.controller.postMessage({
+    command: "refresh-panel-context",
+  });
+  syncDetachedContextState();
+});
+detachContextButton.addEventListener("click", () => {
+  detachedContextURL = String(currentContext?.url || "");
+  syncDetachedContextStorage();
+  webkit.messageHandlers.controller.postMessage({
+    command: "detach-page-context",
+    url: detachedContextURL,
+  });
+  syncDetachedContextState();
 });
 questionEditor.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -251,13 +311,21 @@ function sendQuestion(directPrompt, options = {}) {
     return;
   }
 
-  questionEditor.value = "";
   const selectedFocus = resolveSelectedFocus(options);
   webkit.messageHandlers.controller.postMessage({
     command: "send-question",
     prompt,
     selectedFocus,
+    taskIntent: options.taskIntent || "",
+    detachPageContext:
+      !!detachedContextURL &&
+      (!String(currentContext?.url || "") || detachedContextURL === String(currentContext?.url || "")),
+    detachedContextURL,
   });
+}
+
+function clearQuestionEditor() {
+  questionEditor.value = "";
 }
 
 function stopCurrentResponse() {
@@ -396,6 +464,26 @@ function sdExportHistory() {
   sdPost("export-history-library");
 }
 
+function sdCheckForUpdates() {
+  sdPost("check-for-updates");
+}
+
+function sdOpenSafariExtensionSettings() {
+  sdPost("open-safari-extension-preferences");
+}
+
+function sdSaveOpenAICompatibleSettings() {
+  sdPost("save-openai-compatible-settings", {
+    endpoint: openAICompatibleEndpoint.value,
+    apiKey: openAICompatibleApiKey.value,
+  });
+  openAICompatibleDraftDirty = false;
+}
+
+function sdRefreshOpenAICompatibleModels() {
+  sdPost("refresh-openai-compatible-models");
+}
+
 document
   .getElementById("sd-login-codex")
   .addEventListener("click", () => sdPost("start-codex-login"));
@@ -455,6 +543,18 @@ document
 document
   .getElementById("sd-export-history")
   .addEventListener("click", () => sdExportHistory());
+document
+  .getElementById("sd-check-updates")
+  .addEventListener("click", () => sdCheckForUpdates());
+document
+  .getElementById("sd-open-safari-extension-settings")
+  .addEventListener("click", () => sdOpenSafariExtensionSettings());
+document
+  .getElementById("sd-save-openai-compatible")
+  .addEventListener("click", () => sdSaveOpenAICompatibleSettings());
+document
+  .getElementById("sd-refresh-openai-compatible-models")
+  .addEventListener("click", () => sdRefreshOpenAICompatibleModels());
 
 syncSystemPromptButtons();
 
@@ -488,10 +588,22 @@ function renderSettingsDrawerState(payload) {
     payload.codexLoggedIn ? "true" : "false";
   el("sd-provider-zed").dataset.active =
     payload.zedLoggedIn ? "true" : "false";
+  el("sd-provider-openai-compatible").dataset.active =
+    payload.openAICompatibleConfigured ? "true" : "false";
   el("sd-provider-codex").dataset.selected =
     payload.activeProvider === "codex" ? "true" : "false";
   el("sd-provider-zed").dataset.selected =
     payload.activeProvider === "zed" ? "true" : "false";
+  el("sd-provider-openai-compatible").dataset.selected =
+    payload.activeProvider === "openai_compatible" ? "true" : "false";
+  openAICompatibleSection.hidden = payload.activeProvider !== "openai_compatible";
+  if (!isEditingOpenAICompatibleSettings()) {
+    openAICompatibleEndpoint.value = payload.openAICompatibleEndpoint || "";
+    openAICompatibleApiKey.value = payload.openAICompatibleApiKey || "";
+  }
+  openAICompatibleStatus.textContent = payload.openAICompatibleKeySaved
+    ? t("api_key_saved")
+    : t("api_key_missing");
 
   el("sd-placement-remember").dataset.active =
     payload.placementMode === "remember" ? "true" : "false";
@@ -526,7 +638,17 @@ function renderSettingsDrawerState(payload) {
 
   applyTheme(currentDrawerState.theme);
   applyTranslations();
+  applyPageVisualState(latestPageVisualMetadata);
   syncSystemPromptEditor(currentDrawerState.customSystemPrompt);
+}
+
+function isEditingOpenAICompatibleSettings() {
+  const activeElement = document.activeElement;
+  return (
+    openAICompatibleDraftDirty ||
+    activeElement === openAICompatibleEndpoint ||
+    activeElement === openAICompatibleApiKey
+  );
 }
 
 // MARK: - Streaming state
@@ -557,15 +679,19 @@ function beginStreamMessage() {
 
 /**
  * Called by Swift for each text chunk.
- * Appends raw text to the bubble as plain text (fast, no markdown parse per chunk).
+ * Appends raw text to the bubble and renders the accumulated Markdown immediately.
  */
 function appendStreamChunk(chunk) {
   if (!_streamingEntry) return;
-  _streamingText += chunk;
+  _streamingText += String(chunk || "");
+  renderStreamingMarkdown();
+}
+
+function renderStreamingMarkdown() {
+  if (!_streamingEntry) return;
   const inner = _streamingEntry.querySelector(".message-markdown");
   if (inner) {
-    // Show raw text while streaming; markdown is rendered on finalize
-    inner.textContent = _streamingText;
+    inner.innerHTML = renderMarkdown(_streamingText);
     _streamingEntry.scrollIntoView({ block: "end", behavior: "smooth" });
   }
 }
@@ -578,7 +704,7 @@ function finalizeStreamMessage() {
   if (!_streamingEntry) return;
   const inner = _streamingEntry.querySelector(".message-markdown");
   if (inner) {
-    inner.innerHTML = renderMarkdown(_streamingText);
+    renderStreamingMarkdown();
     inner.classList.remove("message-streaming");
   }
   _streamingEntry.dataset.streaming = "false";
@@ -595,8 +721,18 @@ function renderPanelState(payload) {
     ? payload.historyThreads
     : [];
   currentContext = context;
+  if (
+    detachedContextURL &&
+    String(context?.url || "") &&
+    detachedContextURL !== String(context?.url || "")
+  ) {
+    detachedContextURL = "";
+    syncDetachedContextStorage();
+  }
+  latestPageVisualMetadata = resolvePageVisualMetadata(context);
   currentThreadId = String(payload?.currentThreadId || "");
   isStreamingResponse = !!payload?.isStreaming;
+  isPreparingQuestion = !!payload?.isPreparingQuestion;
 
   if (settings.drawerState) {
     renderSettingsDrawerState(settings.drawerState);
@@ -604,8 +740,8 @@ function renderPanelState(payload) {
     applyTranslations();
   }
 
-  questionEditor.disabled = !settings.isLoggedIn || isStreamingResponse;
-  askPageButton.disabled = !settings.isLoggedIn;
+  questionEditor.disabled = !settings.isLoggedIn || isStreamingResponse || isPreparingQuestion;
+  askPageButton.disabled = !settings.isLoggedIn || isPreparingQuestion;
   historyButton.disabled = false;
   settingsButton.disabled = false;
   syncAskButton();
@@ -620,18 +756,45 @@ function renderPanelState(payload) {
   }
   contextURL.textContent = context?.url || "";
   contextPreviewURL.textContent = context?.url || "";
+  syncDetachedContextState();
+  syncVideoSummaryButton();
   const currentSelectionText = getCurrentSelectionText();
   contextSelectionText.textContent = currentSelectionText
     ? `"${currentSelectionText}"`
     : "";
   contextSelectionText.classList.toggle("is-hidden", !currentSelectionText);
   applyVisibility(settings);
+  latestHistoryThreads = historyThreads;
   renderHistoryThreadList(historyThreads, currentThreadId);
-  applyPageVisualState(context?.metadata || {});
+  applyPageVisualState(latestPageVisualMetadata);
 }
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme || "blue";
+}
+
+function resolvePageVisualMetadata(context) {
+  const metadata = context?.metadata || {};
+  const contextURLValue = String(context?.url || "");
+  if (hasPageVisualMetadata(metadata)) {
+    latestPageVisualURL = contextURLValue;
+    return metadata;
+  }
+
+  if (contextURLValue && contextURLValue === latestPageVisualURL) {
+    return latestPageVisualMetadata;
+  }
+
+  latestPageVisualURL = "";
+  return metadata;
+}
+
+function hasPageVisualMetadata(metadata) {
+  return !!(
+    normalizeVisualValue(metadata?.pageBackgroundColor) ||
+    normalizeVisualValue(metadata?.pageBackgroundImage) ||
+    normalizeAppearance(metadata?.pageColorScheme)
+  );
 }
 
 function applyPageVisualState(metadata) {
@@ -731,8 +894,37 @@ function clearSurfacePalette() {
 function applyVisibility(settings) {
   const showPageInfo = settings.showPageInfo !== false;
 
-  contextURL.classList.toggle("is-hidden", !showPageInfo);
+  contextURLRow.classList.toggle("is-hidden", !showPageInfo);
   composerDivider.classList.toggle("is-hidden", !showPageInfo);
+}
+
+function syncVideoSummaryButton() {
+  const metadata = currentContext?.metadata || {};
+  const pageKind = String(metadata.pageKind || "");
+  const hasVideo =
+    pageKind === "youtube_video" ||
+    pageKind === "bilibili_video" ||
+    String(metadata.hasPrimaryVideo || "") === "true";
+  summarizeVideoButton.classList.toggle("is-hidden", !hasVideo);
+  summarizeVideoButton.hidden = !hasVideo;
+}
+
+function syncDetachedContextState() {
+  const contextURLValue = String(currentContext?.url || "");
+  const detached = !!detachedContextURL && (!contextURLValue || detachedContextURL === contextURLValue);
+  contextURLRow.dataset.detached = detached ? "true" : "false";
+  contextURL.textContent = detached ? "" : contextURLValue;
+  detachContextButton.hidden = !contextURLValue || detached;
+  detachContextButton.disabled = !contextURLValue || detached;
+  refreshContextURLButton.hidden = !contextURLValue && !detached;
+  refreshContextURLButton.disabled = !contextURLValue && !detached;
+}
+
+function syncDetachedContextStorage() {
+  webkit.messageHandlers.controller.postMessage({
+    command: "set-detached-context-url",
+    url: detachedContextURL,
+  });
 }
 
 function syncAskButton() {
@@ -791,6 +983,7 @@ function applyTranslations() {
   document.getElementById("settings-label-provider").textContent = t("provider");
   document.getElementById("settings-label-codex").textContent = t("codex_account");
   document.getElementById("settings-label-zed").textContent = t("zed_account");
+  document.getElementById("settings-label-openai-compatible").textContent = t("openai_compatible");
   document.getElementById("settings-label-theme").textContent = t("theme");
   document.getElementById("settings-label-language").textContent = t("language");
   document.getElementById("settings-label-page-color").textContent = t("page_color");
@@ -799,12 +992,16 @@ function applyTranslations() {
   document.getElementById("settings-label-system-prompt").textContent = t("system_prompt");
   document.getElementById("settings-label-placement").textContent = t("placement");
   document.getElementById("settings-label-follow-safari").textContent = t("follow_safari");
+  document.getElementById("settings-label-updates").textContent = t("updates");
   document.getElementById("history-header-title").textContent = t("history_title");
 
   document.getElementById("sd-login-codex").textContent = t("sign_in");
   document.getElementById("sd-logout-codex").textContent = t("sign_out");
   document.getElementById("sd-import-zed").textContent = t("import_zed");
   document.getElementById("sd-logout-zed").textContent = t("sign_out");
+  document.getElementById("sd-provider-openai-compatible").textContent = t("openai_compatible");
+  document.getElementById("sd-save-openai-compatible").textContent = t("save");
+  document.getElementById("sd-refresh-openai-compatible-models").textContent = t("refresh_models");
   document.getElementById("sd-theme-blue").textContent = t("blue");
   document.getElementById("sd-theme-orange").textContent = t("orange");
   document.getElementById("sd-theme-gray").textContent = t("gray");
@@ -816,12 +1013,14 @@ function applyTranslations() {
   document.getElementById("sd-import-history").textContent = t("import");
   document.getElementById("sd-export-history").textContent = t("export");
   document.getElementById("sd-toggle-page-info").textContent = t("current_page");
+  document.getElementById("sd-open-safari-extension-settings").textContent = t("safari_extension");
   document.getElementById("sd-save-system-prompt").textContent = t("save");
   document.getElementById("sd-reset-system-prompt").textContent = t("reset_default");
   document.getElementById("sd-placement-remember").textContent = t("remember");
   document.getElementById("sd-placement-left").textContent = t("snap_left");
   document.getElementById("sd-placement-right").textContent = t("snap_right");
   document.getElementById("sd-follow-safari-window").textContent = t("follow_safari_button");
+  document.getElementById("sd-check-updates").textContent = t("check_updates");
   document.getElementById("sd-history-storage-path").textContent =
     currentDrawerState.historyStoragePath || t("default_location");
   document.getElementById("sd-history-storage-status").textContent =
@@ -854,6 +1053,11 @@ function applyTranslations() {
     suggestionButtons[2].dataset.prompt =
       currentLanguage() === "zh" ? "针对当前页面给出建议" : "Give suggestions for the current page";
   }
+  summarizeVideoButton.textContent = t("summarize_video");
+  summarizeVideoButton.dataset.prompt =
+    currentLanguage() === "zh"
+      ? "根据视频时间戳总结这个视频的主要内容。"
+      : "Summarize the main content of this video using timestamps.";
 }
 
 function normalizeVisualValue(value) {
@@ -932,17 +1136,68 @@ function bindModels(models, selectedModel) {
     Array.isArray(models) && models.length
       ? models
       : [{ id: "gpt-5.4-mini", label: "gpt-5.4-mini" }];
+  const localSelection = loadLocalModelSelection();
+  const matchingSelectedModel = findMatchingModelID(safeModels, selectedModel);
+  const matchingLocalSelection = findMatchingModelID(safeModels, localSelection);
+  const preferredSelection = safeModels.some((model) => model.id === selectedModel)
+    ? selectedModel
+    : matchingSelectedModel || matchingLocalSelection || selectedModel;
   for (const model of safeModels) {
     const option = document.createElement("option");
     option.value = model.id;
     option.textContent = model.label || model.id;
     modelSelect.appendChild(option);
   }
-  modelSelect.value = selectedModel;
-  if (modelSelect.value !== selectedModel && modelSelect.options.length > 0) {
+  modelSelect.value = preferredSelection;
+  if (modelSelect.value !== preferredSelection && modelSelect.options.length > 0) {
     modelSelect.selectedIndex = 0;
   }
+  saveLocalModelSelection(modelSelect.value);
   syncSelectedModelDisplay();
+}
+
+function findMatchingModelID(models, modelID) {
+  const normalized = String(modelID || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  const parsed = parseModelOptionID(normalized);
+  const match = models.find((model) => {
+    if (model.id === normalized) {
+      return true;
+    }
+    const candidate = parseModelOptionID(model.id);
+    return candidate.modelID === parsed.modelID && candidate.provider === parsed.provider;
+  });
+  return match?.id || "";
+}
+
+function parseModelOptionID(value) {
+  const marker = "::";
+  const index = String(value || "").indexOf(marker);
+  if (index >= 0) {
+    return {
+      provider: String(value).slice(0, index),
+      modelID: String(value).slice(index + marker.length),
+    };
+  }
+  return { provider: "", modelID: String(value || "") };
+}
+
+function loadLocalModelSelection() {
+  try {
+    return localStorage.getItem(LOCAL_MODEL_SELECTION_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveLocalModelSelection(value) {
+  try {
+    localStorage.setItem(LOCAL_MODEL_SELECTION_KEY, String(value || ""));
+  } catch {
+    // Ignore local storage failures in WebKit private contexts.
+  }
 }
 
 function syncSelectedModelDisplay() {
@@ -1066,6 +1321,7 @@ function renderHistoryThreadList(threads, activeThreadId) {
 function openHistoryActionMenu(threadId, isPinned, anchor) {
   openHistoryMenuThreadId = threadId;
   openHistoryMenuPinned = isPinned;
+  deleteConfirmThreadId = "";
   historyActionMenu.innerHTML = `
     <button type="button" class="history-action-menu-item" data-history-action="rename">${t("rename")}</button>
     <button type="button" class="history-action-menu-item" data-history-action="pin">${isPinned ? t("unpin") : t("pin")}</button>
@@ -1080,15 +1336,44 @@ function openHistoryActionMenu(threadId, isPinned, anchor) {
   historyActionMenu.style.left = `${Math.max(12, anchorRect.right - drawerRect.left - 152)}px`;
 }
 
+function showHistoryRenameForm() {
+  const thread = latestHistoryThreads.find(
+    (item) => String(item.id || "") === String(openHistoryMenuThreadId),
+  );
+  const currentTitle = thread?.title || "";
+  historyActionMenu.innerHTML = `
+    <form class="history-action-rename-form" data-history-rename-form="true">
+      <input
+        class="history-action-rename-input"
+        type="text"
+        value="${escapeHtml(currentTitle)}"
+        placeholder="${escapeHtml(t("rename_prompt"))}"
+        aria-label="${escapeHtml(t("rename_prompt"))}"
+      />
+      <div class="history-action-rename-actions">
+        <button type="button" class="history-action-menu-item" data-history-action="cancel-rename">${t("cancel")}</button>
+        <button type="submit" class="history-action-menu-item history-action-menu-item-primary">${t("save")}</button>
+      </div>
+    </form>
+  `;
+  const input = historyActionMenu.querySelector(".history-action-rename-input");
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
 function closeHistoryActionMenu() {
   openHistoryMenuThreadId = "";
   openHistoryMenuPinned = false;
+  deleteConfirmThreadId = "";
   historyActionMenu.classList.remove("open");
   historyActionMenu.setAttribute("aria-hidden", "true");
   historyActionMenu.innerHTML = "";
 }
 
 historyActionMenu.addEventListener("click", (event) => {
+  event.stopPropagation();
   const actionButton = event.target.closest?.("[data-history-action]");
   if (!actionButton || !openHistoryMenuThreadId) {
     return;
@@ -1096,10 +1381,11 @@ historyActionMenu.addEventListener("click", (event) => {
 
   const action = actionButton.dataset.historyAction || "";
   if (action === "rename") {
-    webkit.messageHandlers.controller.postMessage({
-      command: "prompt-rename-thread",
-      threadId: openHistoryMenuThreadId,
-    });
+    showHistoryRenameForm();
+    return;
+  } else if (action === "cancel-rename") {
+    closeHistoryActionMenu();
+    return;
   } else if (action === "pin") {
     webkit.messageHandlers.controller.postMessage({
       command: "toggle-pin-thread",
@@ -1107,13 +1393,47 @@ historyActionMenu.addEventListener("click", (event) => {
       isPinned: !openHistoryMenuPinned,
     });
   } else if (action === "delete") {
+    if (deleteConfirmThreadId !== openHistoryMenuThreadId) {
+      deleteConfirmThreadId = openHistoryMenuThreadId;
+      actionButton.textContent = t("delete_confirm");
+      actionButton.classList.add("history-action-menu-item-confirming");
+      return;
+    }
     webkit.messageHandlers.controller.postMessage({
-      command: "confirm-delete-thread",
+      command: "delete-thread",
       threadId: openHistoryMenuThreadId,
     });
   }
 
   closeHistoryActionMenu();
+});
+
+historyActionMenu.addEventListener("submit", (event) => {
+  event.stopPropagation();
+  const form = event.target.closest?.("[data-history-rename-form]");
+  if (!form || !openHistoryMenuThreadId) {
+    return;
+  }
+  event.preventDefault();
+  const input = form.querySelector(".history-action-rename-input");
+  const title = String(input?.value || "").trim();
+  if (!title) {
+    input?.focus();
+    return;
+  }
+  webkit.messageHandlers.controller.postMessage({
+    command: "rename-thread",
+    threadId: openHistoryMenuThreadId,
+    title,
+  });
+  closeHistoryActionMenu();
+});
+
+historyActionMenu.addEventListener("keydown", (event) => {
+  event.stopPropagation();
+  if (event.key === "Escape") {
+    closeHistoryActionMenu();
+  }
 });
 
 function formatThreadTimestamp(value) {
@@ -1241,7 +1561,13 @@ function renderInlineMarkdown(value) {
   text = text.replace(/\*([^*]+)\*/g, "<em>$1</em>");
   text = text.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+    (_match, label, url) => {
+      const safeURL = sanitizeMarkdownURL(url);
+      if (!safeURL) {
+        return label;
+      }
+      return `<a href="${safeURL}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    },
   );
   return text;
 }
@@ -1250,7 +1576,26 @@ function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function sanitizeMarkdownURL(value) {
+  const url = String(value || "").trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return "";
+    }
+    return escapeHtml(parsed.href);
+  } catch {
+    return "";
+  }
 }
 
 function truncate(value, limit) {

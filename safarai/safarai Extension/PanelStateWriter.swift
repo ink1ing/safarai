@@ -11,6 +11,9 @@ enum PanelStateWriter {
             currentContext: current["context"] as? [String: Any],
             incomingContext: normalizeContext(context)
         )
+        if isDetachedContext(normalizedIncomingContext) {
+            return
+        }
         let incomingMessages = (payload["messages"] as? [[String: Any]] ?? []).map(normalizeMessage(_:))
         let preservedMessages = preserveMessages(
             current: current["messages"] as? [[String: Any]] ?? [],
@@ -29,15 +32,19 @@ enum PanelStateWriter {
 
         persistSelectionIntent(from: normalizedIncomingContext)
 
-        let directory = stateURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: stateURL, options: .atomic)
+        try NativeSharedContainer.writePrivate(data, to: stateURL)
     }
 
     static func updatePage(title: String, url: String, status: String? = nil) throws {
+        if isDetachedURL(url) {
+            return
+        }
         let current = loadRawSnapshot() ?? [:]
         var context = (current["context"] as? [String: Any]) ?? [:]
+        if context.isEmpty {
+            context = makeFallbackContext(title: title, url: url)
+        }
         context["title"] = title
         context["url"] = url
 
@@ -49,10 +56,71 @@ enum PanelStateWriter {
             "updatedAt": Date().timeIntervalSince1970,
         ]
 
-        let directory = stateURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: stateURL, options: .atomic)
+        try NativeSharedContainer.writePrivate(data, to: stateURL)
+    }
+
+    private static func makeFallbackContext(title: String, url: String) -> [String: Any] {
+        let domain = URL(string: url)?.host ?? ""
+        return [
+            "site": "unsupported",
+            "url": url,
+            "title": title,
+            "selection": "",
+            "articleText": title.isEmpty ? url : "title: \(title)\nurl: \(url)",
+            "videoRAGSummary": "",
+            "structureSummary": "",
+            "interactiveSummary": "",
+            "metadata": [
+                "domain": domain,
+                "pageKind": "fallback_tab_context",
+                "contentStrategy": "fallback_tab_context",
+                "pageContextTransport": "safari_page_properties",
+                "pageContextUpdatedAt": ISO8601DateFormatter().string(from: Date()),
+            ],
+            "debugSelection": [:],
+            "visualSummary": "",
+            "videoTranscript": [],
+        ]
+    }
+
+    private static func isDetachedContext(_ context: [String: Any]?) -> Bool {
+        let detachedURL = loadDetachedContextURL()
+        guard !detachedURL.isEmpty else {
+            return false
+        }
+        let incomingURL = ((context?["url"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !incomingURL.isEmpty else {
+            return true
+        }
+        if incomingURL == detachedURL {
+            return true
+        }
+        clearDetachedContextURL()
+        return false
+    }
+
+    private static func isDetachedURL(_ url: String) -> Bool {
+        !loadDetachedContextURL().isEmpty
+    }
+
+    private static func loadDetachedContextURL() -> String {
+        let url = NativeSharedContainer.baseURL().appendingPathComponent("detached-context-url.json")
+        guard
+            let data = try? Data(contentsOf: url),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return ""
+        }
+        return (payload["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func clearDetachedContextURL() {
+        let url = NativeSharedContainer.baseURL().appendingPathComponent("detached-context-url.json")
+        let payload = ["url": ""]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
+            try? NativeSharedContainer.writePrivate(data, to: url)
+        }
     }
 
     static func saveSelectionIntent(url: String, selection: String) {
@@ -68,10 +136,8 @@ enum PanelStateWriter {
             "updatedAt": Date().timeIntervalSince1970,
         ]
 
-        let directory = selectionIntentURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: selectionIntentURL, options: .atomic)
+            try? NativeSharedContainer.writePrivate(data, to: selectionIntentURL)
         }
     }
 
@@ -93,12 +159,73 @@ enum PanelStateWriter {
             "title": String(describing: context["title"] ?? "当前页面"),
             "selection": String(describing: context["selection"] ?? ""),
             "articleText": String(describing: context["articleText"] ?? ""),
+            "videoRAGSummary": String(describing: context["videoRAGSummary"] ?? ""),
             "structureSummary": context["structureSummary"] ?? NSNull(),
             "interactiveSummary": context["interactiveSummary"] ?? NSNull(),
             "metadata": metadata,
             "debugSelection": debugSelection,
             "visualSummary": buildVisualSummary(context, metadata: metadata) as Any,
+            "videoTranscript": normalizeVideoTranscript(context["videoTranscript"] as? [[String: Any]]) as Any,
+            "videoFrameSamples": normalizeVideoFrameSamples(context["videoFrameSamples"] as? [[String: Any]]) as Any,
         ]
+    }
+
+    private static func normalizeVideoTranscript(_ items: [[String: Any]]?) -> [[String: Any]] {
+        (items ?? [])
+            .prefix(240)
+            .compactMap { item -> [String: Any]? in
+                let text = String(describing: item["text"] ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
+
+                let startSeconds = numericValue(item["startSeconds"]) ?? 0
+                let endSeconds = numericValue(item["endSeconds"])
+                var payload: [String: Any] = [
+                    "startSeconds": startSeconds,
+                    "timestamp": String(describing: item["timestamp"] ?? formatTimestamp(startSeconds)),
+                    "text": String(text.prefix(360)),
+                    "source": String(describing: item["source"] ?? "unknown"),
+                ]
+                if let endSeconds {
+                    payload["endSeconds"] = endSeconds
+                }
+                return payload
+            }
+    }
+
+    private static func normalizeVideoFrameSamples(_ items: [[String: Any]]?) -> [[String: Any]] {
+        (items ?? [])
+            .prefix(8)
+            .compactMap { item -> [String: Any]? in
+                let image = String(describing: item["image"] ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard image.hasPrefix("data:image/") else { return nil }
+
+                let timeSeconds = numericValue(item["timeSeconds"]) ?? 0
+                return [
+                    "timestamp": String(describing: item["timestamp"] ?? formatTimestamp(timeSeconds)),
+                    "timeSeconds": timeSeconds,
+                    "image": image,
+                ]
+            }
+    }
+
+    private static func numericValue(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? Int { return Double(value) }
+        if let value = value as? String { return Double(value) }
+        return nil
+    }
+
+    private static func formatTimestamp(_ value: Double) -> String {
+        let seconds = max(0, Int(value.rounded()))
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        let remaining = seconds % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
+        }
+        return String(format: "%02d:%02d", minutes, remaining)
     }
 
     private static func normalizeMessage(_ item: [String: Any]) -> [String: String] {

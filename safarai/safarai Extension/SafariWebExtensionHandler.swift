@@ -5,6 +5,7 @@
 //  Created by silas on 3/13/26.
 //
 
+import Foundation
 import SafariServices
 import os.log
 
@@ -27,7 +28,8 @@ class SafariWebExtensionHandler: SFSafariExtensionHandler {
             message = request?.userInfo?["message"]
         }
 
-        os_log(.default, "Received message from browser.runtime.sendNativeMessage: %@ (profile: %@)", String(describing: message), profile?.uuidString ?? "none")
+        let messageType = (message as? [String: Any])?["type"] as? String ?? "unknown"
+        os_log(.default, "Received native message type: %@ (profile: %@)", messageType, profile?.uuidString ?? "none")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let responsePayload = NativeRouter.route(message: message)
@@ -42,43 +44,6 @@ class SafariWebExtensionHandler: SFSafariExtensionHandler {
         }
     }
 
-    override func messageReceivedFromContainingApp(withName messageName: String, userInfo: [String : Any]? = nil) {
-        guard messageName == "refresh-active-page" else {
-            return
-        }
-
-        SFSafariApplication.getAllWindows { windows in
-            guard let window = windows.first else {
-                return
-            }
-
-            window.getActiveTab { tab in
-                guard let tab else {
-                    return
-                }
-
-                tab.getActivePage { page in
-                    guard let page else {
-                        return
-                    }
-
-                    page.getPropertiesWithCompletionHandler { properties in
-                        guard
-                            let properties,
-                            let url = properties.url?.absoluteString,
-                            !url.isEmpty
-                        else {
-                            return
-                        }
-
-                        let title = properties.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "当前页面"
-                        try? PanelStateWriter.updatePage(title: title, url: url, status: "页面已刷新")
-                    }
-                }
-            }
-        }
-    }
-
     override func page(_ page: SFSafariPage, willNavigateTo url: URL?) {
         guard let absoluteURL = url?.absoluteString, !absoluteURL.isEmpty else {
             return
@@ -87,6 +52,45 @@ class SafariWebExtensionHandler: SFSafariExtensionHandler {
         page.getPropertiesWithCompletionHandler { properties in
             let title = properties?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "当前页面"
             try? PanelStateWriter.updatePage(title: title, url: absoluteURL, status: "页面已同步")
+        }
+    }
+
+    override func messageReceived(withName messageName: String, from page: SFSafariPage, userInfo: [String : Any]?) {
+        guard messageName == "refresh-active-page-context" || messageName == "sample-active-video-frames" else {
+            return
+        }
+
+        page.getPropertiesWithCompletionHandler { properties in
+            let url = properties?.url?.absoluteString ?? ""
+            let title = properties?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "当前页面"
+            if !url.isEmpty {
+                try? PanelStateWriter.updatePage(title: title, url: url, status: "页面地址已刷新")
+            }
+        }
+        page.dispatchMessageToScript(withName: "refresh-active-page-context", userInfo: nil)
+    }
+
+    override func messageReceivedFromContainingApp(withName messageName: String, userInfo: [String : Any]?) {
+        guard messageName == "refresh-active-page-context" else {
+            return
+        }
+
+        SFSafariApplication.getActiveWindow { window in
+            window?.getActiveTab { tab in
+                tab?.getActivePage { page in
+                    guard let page else {
+                        return
+                    }
+                    page.getPropertiesWithCompletionHandler { properties in
+                        let url = properties?.url?.absoluteString ?? ""
+                        let title = properties?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "当前页面"
+                        if !url.isEmpty {
+                            try? PanelStateWriter.updatePage(title: title, url: url, status: "页面地址已刷新")
+                        }
+                    }
+                    page.dispatchMessageToScript(withName: messageName, userInfo: nil)
+                }
+            }
         }
     }
 

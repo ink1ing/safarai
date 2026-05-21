@@ -116,6 +116,8 @@ html[data-theme="green"] {
 html,
 body {
     height: 100%;
+    -webkit-user-select: text;
+    user-select: text;
 }
 
 body {
@@ -168,7 +170,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    padding: 16px;
+    padding: 44px 16px 16px;
     border-right: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -211,8 +213,11 @@ body {
 }
 
 .drawer-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: 20px;
-    text-align: center;
+    min-width: 20px;
 }
 
 .drawer-usage {
@@ -552,13 +557,44 @@ body {
         inset 0 0 10px rgba(255, 255, 255, 0.02);
 }
 
+.context-url-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .context-url {
+    min-width: 0;
+    flex: 1;
     color: var(--muted-soft);
     font-size: 11px;
     font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.context-url-row[data-detached="true"] .context-url {
+    font-style: italic;
+}
+
+.context-action-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 999px;
+    color: var(--muted-soft);
+    background: transparent;
+    cursor: pointer;
+}
+
+.context-action-button:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
 }
 
 .context-selection-text {
@@ -1010,6 +1046,26 @@ body {
     box-shadow: 0 0 0 1px var(--primary-outline);
 }
 
+.settings-input {
+    width: 100%;
+    border: 1px solid var(--control-border-strong);
+    border-radius: 10px;
+    padding: 8px 10px;
+    margin-top: 8px;
+    background: var(--surface-soft);
+    color: var(--text-primary);
+    font:
+        12px/1.4 "SF Mono",
+        Menlo,
+        monospace;
+}
+
+.settings-input:focus {
+    outline: none;
+    border-color: var(--primary-outline);
+    box-shadow: 0 0 0 1px var(--primary-outline);
+}
+
 .history-drawer {
     position: absolute;
     right: 16px;
@@ -1180,8 +1236,47 @@ body {
     background: var(--surface-soft);
 }
 
+.history-action-menu-item-primary {
+    color: var(--accent-strong);
+}
+
 .history-action-menu-item-danger {
     color: #ffb3b0;
+}
+
+.history-action-menu-item-confirming {
+    background: rgba(255, 95, 87, 0.16);
+    color: #ffd1cf;
+}
+
+.history-action-rename-form {
+    display: grid;
+    gap: 8px;
+    min-width: 210px;
+}
+
+.history-action-rename-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--control-border);
+    border-radius: 8px;
+    padding: 8px 9px;
+    background: var(--surface-soft);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 12px;
+    outline: none;
+}
+
+.history-action-rename-input:focus {
+    border-color: var(--accent-strong);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.history-action-rename-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
 }
 
 .history-thread-meta {

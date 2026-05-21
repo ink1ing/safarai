@@ -46,10 +46,6 @@ enum WindowPlacementCoordinator {
         window: NSWindow,
         mode: PlacementMode
     ) -> NSRect? {
-        guard mode == .left || mode == .right else {
-            return nil
-        }
-
         if let safariFrame = safariWindowFrame() {
             return targetFrameBesideSafari(window: window, safariFrame: safariFrame, mode: mode)
         }
@@ -238,9 +234,9 @@ final class SafariWindowFollower {
 
     func start() {
         stop()
-        guard followEnabledProvider(), placementModeProvider() != .remember else { return }
+        guard followEnabledProvider() else { return }
 
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
             self?.tick()
         }
         tick()
@@ -264,7 +260,7 @@ final class SafariWindowFollower {
         }
 
         let placementMode = placementModeProvider()
-        guard followEnabledProvider(), placementMode == .left || placementMode == .right else {
+        guard followEnabledProvider() else {
             stop()
             return
         }

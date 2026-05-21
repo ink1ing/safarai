@@ -9,6 +9,8 @@ import {
 test("detectSite 能识别 GitHub 与 Gmail", () => {
   assert.equal(detectSite("github.com"), "github");
   assert.equal(detectSite("mail.google.com"), "gmail");
+  assert.equal(detectSite("www.youtube.com"), "youtube");
+  assert.equal(detectSite("www.bilibili.com"), "bilibili");
   assert.equal(detectSite("example.com"), "unsupported");
 });
 
@@ -345,6 +347,205 @@ test("Yahoo Mail 会识别邮件正文和编辑器", () => {
   assert.match(result.articleText, /^Yahoo mail content/);
 });
 
+test("YouTube 视频页会提取标题、频道、描述和可见字幕", () => {
+  const title = createNode({ tagName: "H1", textContent: "How Safari Extensions Work" });
+  const channel = createNode({ tagName: "DIV", textContent: "WebKit Channel" });
+  const description = createNode({
+    textContent: "This video explains Safari extension architecture and message passing in detail.",
+  });
+  const transcriptA = createNode({ textContent: "00:00 Welcome to the Safari extension walkthrough." });
+  const transcriptB = createNode({ textContent: "00:12 The content script reads the current page context." });
+  const transcriptRoot = createNode({
+    tagName: "YTD-TRANSCRIPT-RENDERER",
+    children: [transcriptA, transcriptB],
+  });
+
+  const doc = createDocument({
+    title: "How Safari Extensions Work - YouTube",
+    selectors: {
+      "h1.ytd-watch-metadata": title,
+      "#owner #channel-name": channel,
+      "#description-inline-expander": description,
+      "ytd-transcript-renderer": transcriptRoot,
+    },
+    selectorAll: {
+      "ytd-transcript-segment-renderer": [transcriptA, transcriptB],
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.youtube.com/watch?v=abc123",
+    hostname: "www.youtube.com",
+    pathname: "/watch",
+  });
+
+  const result = extractPageContext(win, doc);
+  assert.equal(result.site, "youtube");
+  assert.equal(result.metadata.pageKind, "youtube_video");
+  assert.equal(result.metadata.videoTitle, "How Safari Extensions Work");
+  assert.equal(result.metadata.videoAuthor, "WebKit Channel");
+  assert.equal(result.metadata.hasTranscript, "true");
+  assert.equal(result.metadata.videoTranscriptCount, "2");
+  assert.equal(result.videoTranscript[1].timestamp, "00:12");
+  assert.equal(result.videoTranscript[1].text, "The content script reads the current page context.");
+  assert.match(result.articleText, /video_title: How Safari Extensions Work/);
+  assert.match(result.articleText, /video_transcript_or_visible_subtitles/);
+  assert.match(result.structureSummary, /has_transcript=true/);
+});
+
+test("YouTube 视频页会提取章节和评论注意力信号", () => {
+  const title = createNode({ tagName: "H1", textContent: "1989 documentary timeline" });
+  const description = createNode({
+    textContent: "00:00 Background of the movement. 07:50 Zhao Ziyang appears in Tiananmen Square.",
+  });
+  const chapter = createNode({
+    textContent: "07:50 Zhao Ziyang appears in Tiananmen Square",
+  });
+  const commentA = createNode({
+    textContent: "7:50 这一段赵紫阳最后露面非常震撼，很多人反复回看。",
+  });
+  const commentB = createNode({
+    textContent: "1:13 It's my duty 这一句是整个视频的情绪峰值。",
+  });
+  const doc = createDocument({
+    title: "1989 documentary timeline - YouTube",
+    selectors: {
+      "h1.ytd-watch-metadata": title,
+      "#description-inline-expander": description,
+    },
+    selectorAll: {
+      "#description-inline-expander": [description],
+      "ytd-macro-markers-list-item-renderer": [chapter],
+      "ytd-comment-thread-renderer #content-text": [commentA, commentB],
+    },
+  });
+  const win = createWindow({
+    href: "https://www.youtube.com/watch?v=history123",
+    hostname: "www.youtube.com",
+    pathname: "/watch",
+  });
+
+  const result = extractPageContext(win, doc);
+  assert.match(result.videoRAGSummary, /salient_timestamp_signals/);
+  assert.match(result.videoRAGSummary, /07:50 Zhao Ziyang/);
+  assert.match(result.videoRAGSummary, /collective_attention_signals/);
+  assert.match(result.videoRAGSummary, /It's my duty/);
+  assert.match(result.articleText, /video_chapters_or_moments/);
+  assert.match(result.articleText, /comment_attention_signals/);
+});
+
+test("YouTube 视频页无 transcript DOM 时会读取 textTracks cues", () => {
+  const video = createNode({
+    tagName: "VIDEO",
+    rect: { top: 10, left: 10, width: 1280, height: 720, right: 1290, bottom: 730 },
+    duration: 180,
+    currentTime: 14,
+    textTracks: [
+      {
+        cues: [
+          { startTime: 0, endTime: 8, text: "Welcome to the video." },
+          { startTime: 12, endTime: 24, text: "Now we explain timestamped context." },
+        ],
+      },
+    ],
+  });
+  const doc = createDocument({
+    title: "Captioned video - YouTube",
+    selectors: {
+      video,
+    },
+    selectorAll: {
+      video: [video],
+    },
+  });
+  const win = createWindow({
+    href: "https://www.youtube.com/watch?v=track123",
+    hostname: "www.youtube.com",
+    pathname: "/watch",
+  });
+
+  const result = extractPageContext(win, doc);
+  assert.equal(result.metadata.hasPrimaryVideo, "true");
+  assert.equal(result.metadata.videoDurationSeconds, "180");
+  assert.equal(result.metadata.videoCurrentTimeSeconds, "14");
+  assert.equal(result.metadata.videoTranscriptSource, "text_track");
+  assert.equal(result.videoTranscript[1].timestamp, "00:12");
+  assert.equal(result.videoTranscript[1].endSeconds, 24);
+});
+
+test("Bilibili 视频页会提取标题、UP 主、简介和字幕候选", () => {
+  const title = createNode({ tagName: "H1", textContent: "Safari AI 轻量扩展开发记录" });
+  const up = createNode({ tagName: "A", textContent: "前端实验室" });
+  const description = createNode({
+    textContent: "本期记录如何把页面内容、视频字幕和聊天面板连接起来。",
+  });
+  const subtitleA = createNode({ textContent: "首先我们读取当前视频页的基础信息。" });
+  const subtitleB = createNode({ textContent: "然后把字幕候选合并进上下文。" });
+  const subtitlePanel = createNode({
+    tagName: "DIV",
+    children: [subtitleA, subtitleB],
+  });
+
+  const doc = createDocument({
+    title: "Safari AI 轻量扩展开发记录_bilibili",
+    selectors: {
+      ".video-title": title,
+      ".up-name": up,
+      ".video-desc": description,
+      ".bpx-player-subtitle-panel": subtitlePanel,
+    },
+    selectorAll: {
+      ".bpx-player-subtitle-panel-text": [subtitleA, subtitleB],
+    },
+  });
+
+  const win = createWindow({
+    href: "https://www.bilibili.com/video/BV1abc123456/",
+    hostname: "www.bilibili.com",
+    pathname: "/video/BV1abc123456/",
+  });
+
+  const result = extractPageContext(win, doc);
+  assert.equal(result.site, "bilibili");
+  assert.equal(result.metadata.pageKind, "bilibili_video");
+  assert.equal(result.metadata.videoTitle, "Safari AI 轻量扩展开发记录");
+  assert.equal(result.metadata.videoAuthor, "前端实验室");
+  assert.equal(result.metadata.hasTranscript, "true");
+  assert.equal(result.metadata.videoTranscriptSource, "visible_subtitle");
+  assert.equal(result.videoTranscript.length, 2);
+  assert.match(result.articleText, /video_description/);
+  assert.match(result.articleText, /然后把字幕候选合并进上下文/);
+});
+
+test("普通页面含主 video 时会标记可显示视频总结入口", () => {
+  const video = createNode({
+    tagName: "VIDEO",
+    rect: { top: 20, left: 20, width: 960, height: 540, right: 980, bottom: 560 },
+    duration: 64,
+    currentTime: 7,
+  });
+  const doc = createDocument({
+    title: "Embedded video",
+    selectors: {
+      main: createNode({ textContent: "A page with an embedded product walkthrough video.".repeat(6) }),
+      video,
+    },
+    selectorAll: {
+      video: [video],
+    },
+  });
+  const win = createWindow({
+    href: "https://example.com/video-demo",
+    hostname: "example.com",
+    pathname: "/video-demo",
+  });
+
+  const result = extractPageContext(win, doc);
+  assert.equal(result.metadata.hasPrimaryVideo, "true");
+  assert.equal(result.metadata.videoTranscriptCount, "0");
+  assert.deepEqual(result.videoTranscript, []);
+});
+
 test("DOM context v2 会跳过隐藏导航并产出结构与交互摘要", () => {
   const titleNode = createNode({
     tagName: "H1",
@@ -552,6 +753,9 @@ function createNode({
   disabled = false,
   readOnly = false,
   shadowRoot = null,
+  duration = undefined,
+  currentTime = undefined,
+  textTracks = [],
 }) {
   const derivedText =
     textContent ??
@@ -574,6 +778,9 @@ function createNode({
     computedStyle,
     rect,
     shadowRoot,
+    duration,
+    currentTime,
+    textTracks,
     getAttribute(key) {
       return attrs[key] ?? null;
     },

@@ -15,20 +15,25 @@ const SELECTION_CONTEXT_MENU_ID = "ask-selected-text";
 browser.runtime.onInstalled.addListener(() => {
   console.log("Safari AI background ready");
   createSelectionContextMenu();
-  injectContentScriptIntoOpenTabs().catch(() => {});
 });
 
 createSelectionContextMenu();
-injectContentScriptIntoOpenTabs().catch(() => {});
 
 setInterval(() => {
   syncActiveTabSnapshot().catch(() => {});
-}, 1200);
+}, 700);
 
 if (browser.tabs?.onUpdated) {
   browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (!tabId || (!changeInfo.url && changeInfo.status !== "complete")) {
       return;
+    }
+
+    if (changeInfo.url) {
+      await syncTabFallbackContext(tabId, {
+        ...tab,
+        url: changeInfo.url,
+      }, "tabs.onUpdated:url");
     }
 
     await syncTabContext(tabId, tab, "tabs.onUpdated");
@@ -45,6 +50,22 @@ if (browser.tabs?.onActivated) {
 
     await syncTabContext(tab.id, tab, "tabs.onActivated");
     scheduleTabContextResync(tab.id, "tabs.onActivated");
+  });
+}
+
+if (browser.windows?.onFocusChanged) {
+  browser.windows.onFocusChanged.addListener(async (windowId) => {
+    if (windowId === browser.windows.WINDOW_ID_NONE) {
+      return;
+    }
+
+    const [tab] = await browser.tabs.query({ active: true, windowId }).catch(() => []);
+    if (!tab?.id) {
+      return;
+    }
+
+    await syncTabContext(tab.id, tab, "windows.onFocusChanged");
+    scheduleTabContextResync(tab.id, "windows.onFocusChanged");
   });
 }
 
@@ -122,10 +143,16 @@ browser.runtime.onMessage.addListener((message, sender) => {
       return askPage(sender.tab?.id, message.payload?.prompt, message.payload?.selection);
     case "sidebar:get-logs":
       return getLogs();
+    case "native:sample-video-frames":
+      return sampleVideoFramesForActiveTab();
     case "content:selection-updated":
       return syncSelectionFromContent(sender.tab?.id, message.payload);
     case "content:page-updated":
       return syncPanelStateFromContent(sender.tab?.id, message.payload?.context);
+    case "content:fetch-transcript-url":
+      return fetchTranscriptURL(message.payload?.url);
+    case "content:sample-video-frames":
+      return sampleVideoFramesForTab(sender.tab?.id);
     default:
       return Promise.resolve(
         createErrorResponse("unsupported_message", `不支持的消息类型: ${message.type}`)
@@ -175,6 +202,9 @@ async function syncPanelStateFromContent(tabId, context) {
   const resolvedTabId = await resolveTabId(tabId);
   if (!resolvedTabId) {
     return createSuccessResponse({ synced: false });
+  }
+  if (!(await shouldSyncPanelForTab(resolvedTabId, context))) {
+    return createSuccessResponse({ synced: false, skipped: "inactive_or_detached" });
   }
 
   TAB_STATE.set(
@@ -491,6 +521,9 @@ async function ensurePageContext(tabIdFromSender) {
 }
 
 async function syncPanelState(tabId, context) {
+  if (!(await shouldSyncPanelForTab(tabId, context))) {
+    return;
+  }
   const messages = tabId ? await loadSession(tabId) : [];
   await sendNativeControlRequest("sync_panel_state", {
     context,
@@ -574,8 +607,7 @@ async function requestFocusedInputPreparation(tabId) {
   }
 }
 
-async function requestPageContext(tabId, options = {}) {
-  const allowInjection = options.allowInjection !== false;
+async function requestPageContext(tabId) {
   const tab = await browser.tabs.get(tabId).catch(() => null);
   const cachedContext = TAB_STATE.get(tabId) ?? null;
 
@@ -585,14 +617,13 @@ async function requestPageContext(tabId, options = {}) {
     });
 
     if (!response?.ok) {
-      const probedContext = await probePageContextDirectly(tabId, tab);
-      if (probedContext) {
+      const directContext = await probePageContextDirectly(tabId, tab);
+      if (directContext) {
         return createSuccessResponse({
-          context: probedContext,
+          context: directContext,
           degraded: true,
         });
       }
-
       return createSuccessResponse(
         buildDegradedContextPayload(
           tab,
@@ -605,14 +636,13 @@ async function requestPageContext(tabId, options = {}) {
 
     const context = response.payload?.context;
     if (!context) {
-      const probedContext = await probePageContextDirectly(tabId, tab);
-      if (probedContext) {
+      const directContext = await probePageContextDirectly(tabId, tab);
+      if (directContext) {
         return createSuccessResponse({
-          context: probedContext,
+          context: directContext,
           degraded: true,
         });
       }
-
       return createSuccessResponse(
         buildDegradedContextPayload(
           tab,
@@ -638,22 +668,13 @@ async function requestPageContext(tabId, options = {}) {
       },
     });
   } catch (error) {
-    const probedContext = await probePageContextDirectly(tabId, tab);
-    if (probedContext) {
+    const directContext = await probePageContextDirectly(tabId, tab);
+    if (directContext) {
       return createSuccessResponse({
-        context: probedContext,
+        context: directContext,
         degraded: true,
       });
     }
-
-    if (allowInjection) {
-      const injected = await ensureContentScriptInjected(tabId);
-      if (injected) {
-        await delay(140);
-        return requestPageContext(tabId, { allowInjection: false });
-      }
-    }
-
     return createSuccessResponse(
       buildDegradedContextPayload(
         tab,
@@ -665,271 +686,63 @@ async function requestPageContext(tabId, options = {}) {
   }
 }
 
-async function ensureContentScriptInjected(tabId) {
-  if (!tabId) {
-    return false;
-  }
-
-  try {
-    if (browser.scripting?.executeScript) {
-      await browser.scripting.executeScript({
-        target: { tabId },
-        files: ["content.js"],
-      });
-      return true;
-    }
-  } catch {
-    // Fall through to legacy injection path.
-  }
-
-  try {
-    if (browser.tabs?.executeScript) {
-      await browser.tabs.executeScript(tabId, {
-        file: "content.js",
-      });
-      return true;
-    }
-  } catch {
-    return false;
-  }
-
-  return false;
-}
-
-async function injectContentScriptIntoOpenTabs() {
-  const tabs = await browser.tabs.query({}).catch(() => []);
-  for (const tab of tabs) {
-    const tabId = tab?.id ?? null;
-    const url = String(tab?.url ?? "");
-    if (!tabId || !isInjectableURL(url)) {
-      continue;
-    }
-    ensureContentScriptInjected(tabId).catch(() => {});
-  }
-}
-
-function isInjectableURL(url) {
-  return /^https?:\/\//i.test(String(url || ""));
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function probePageContextDirectly(tabId, tab) {
-  if (!tabId) {
-    return null;
-  }
-
-  try {
-    if (browser.scripting?.executeScript) {
-      const results = await browser.scripting.executeScript({
-        target: { tabId },
-        func: directPageContextProbe,
-      });
-      const payload = results?.[0]?.result ?? null;
-      return normalizeDirectProbePayload(payload, tab);
-    }
-  } catch {
-    // Fall through to legacy executeScript path.
-  }
-
-  try {
-    if (browser.tabs?.executeScript) {
-      const code = `(${directPageContextProbe.toString()})()`;
-      const results = await browser.tabs.executeScript(tabId, {
-        code,
-      });
-      const payload = Array.isArray(results) ? results[0] : null;
-      return normalizeDirectProbePayload(payload, tab);
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function normalizeDirectProbePayload(payload, tab) {
-  if (!payload || typeof payload !== "object") {
-    return null;
-  }
-
-  const metadata = payload.metadata ?? {};
-  return {
-    site: isSupportedSite(payload.site) ? payload.site : "unsupported",
-    url: String(payload.url ?? tab?.url ?? ""),
-    title: String(payload.title ?? tab?.title ?? "当前页面"),
-    selection: String(payload.selection ?? ""),
-    articleText: String(payload.articleText ?? ""),
-    structureSummary: "",
-    interactiveSummary: "",
-    interactiveTargets: [],
-    focusedInput: null,
-    metadata: {
-      domain: String(metadata.domain ?? ""),
-      pageKind: String(metadata.pageKind ?? "page"),
-      contentStrategy: "direct_visual_probe",
-      pageBackgroundColor: String(metadata.pageBackgroundColor ?? ""),
-      pageBackgroundImage: String(metadata.pageBackgroundImage ?? "none"),
-      pageColorScheme: String(metadata.pageColorScheme ?? ""),
-      pageBackgroundSource: String(metadata.pageBackgroundSource ?? "direct_probe"),
-      pageContextTransport: "direct_execute_script",
-      pageContextUpdatedAt: new Date().toISOString(),
-      pageContextFallbackReason: "",
-      pageContextError: "",
-      headingCount: "0",
-      interactiveCount: "0",
-      tableCount: "0",
-      codeBlockCount: "0",
-      hasIframes: "false",
-      hasShadowHosts: "false",
-    },
-  };
-}
-
-function directPageContextProbe() {
-  const hostname = window.location.hostname || "";
-  const pathname = window.location.pathname || "";
-  const title = document.title || "Untitled";
-  const selection = String(window.getSelection?.()?.toString?.() ?? "").trim();
-  const mainText =
-    normalizeDirectText(document.querySelector("main")?.innerText) ||
-    normalizeDirectText(document.querySelector("article")?.innerText) ||
-    "";
-  const visual = extractDirectVisualState();
-
-  return {
-    site: detectDirectSite(hostname),
-    url: window.location.href,
-    title,
-    selection,
-    articleText: mainText || `title: ${title}\nurl: ${window.location.href}`,
-    metadata: {
-      domain: hostname,
-      pageKind: inferDirectPageKind(hostname, pathname),
-      pageBackgroundColor: visual.backgroundColor,
-      pageBackgroundImage: visual.backgroundImage,
-      pageColorScheme: visual.colorScheme,
-      pageBackgroundSource: visual.source,
-    },
-  };
-
-  function extractDirectVisualState() {
-    const candidates = [
-      document.querySelector("[data-testid='primaryColumn']"),
-      document.querySelector("main"),
-      document.querySelector("article"),
-      document.body,
-      document.documentElement,
-    ].filter(Boolean);
-
-    let fallbackImage = "none";
-    let fallbackScheme = "";
-
-    for (const candidate of candidates) {
-      let current = candidate;
-      while (current) {
-        const computedStyle = getComputedStyle(current);
-        const backgroundImage = String(computedStyle.backgroundImage || "").trim() || "none";
-        const backgroundColor = String(computedStyle.backgroundColor || "").trim();
-        const colorScheme = normalizeColorScheme(computedStyle.colorScheme);
-
-        if (!fallbackScheme && colorScheme) {
-          fallbackScheme = colorScheme;
-        }
-        if (fallbackImage === "none" && backgroundImage !== "none") {
-          fallbackImage = backgroundImage;
-        }
-        if (backgroundColor && !isTransparent(backgroundColor)) {
-          return {
-            backgroundColor,
-            backgroundImage: backgroundImage !== "none" ? backgroundImage : fallbackImage,
-            colorScheme: colorScheme || fallbackScheme || inferSchemeFromColor(backgroundColor),
-            source: describeNode(current),
-          };
-        }
-        current = current.parentElement;
-      }
-    }
-
-    const fallbackColor = fallbackScheme === "light" ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)";
-    return {
-      backgroundColor: fallbackColor,
-      backgroundImage: fallbackImage,
-      colorScheme: fallbackScheme || inferSchemeFromColor(fallbackColor),
-      source: "direct_probe_fallback",
-    };
-  }
-
-  function detectDirectSite(currentHostname) {
-    if (currentHostname.includes("github.com")) return "github";
-    if (currentHostname.includes("mail.google.com")) return "gmail";
-    if (currentHostname === "x.com" || currentHostname.endsWith(".x.com") || currentHostname.includes("twitter.com")) {
-      return "x";
-    }
-    if (currentHostname.includes("mail.yahoo.com")) return "yahoo_mail";
-    return "unsupported";
-  }
-
-  function inferDirectPageKind(currentHostname, currentPathname) {
-    const site = detectDirectSite(currentHostname);
-    if (site === "x") {
-      if (/\/status\/\d+/.test(currentPathname)) return "x_post";
-      if (currentPathname === "/home") return "x_home";
-    }
-    return "page";
-  }
-
-  function normalizeDirectText(value) {
-    return String(value || "").replace(/\s+/g, " ").trim().slice(0, 12000);
-  }
-
-  function describeNode(node) {
-    if (!node) return "unknown";
-    const tag = String(node.tagName || "").toLowerCase() || "unknown";
-    const id = node.id ? `#${node.id}` : "";
-    return `${tag}${id}`;
-  }
-
-  function normalizeColorScheme(value) {
-    const normalized = String(value || "").trim().toLowerCase();
-    if (normalized.includes("dark") && !normalized.includes("light")) return "dark";
-    if (normalized.includes("light") && !normalized.includes("dark")) return "light";
-    return "";
-  }
-
-  function isTransparent(value) {
-    const normalized = String(value || "").trim().toLowerCase();
-    return !normalized || normalized === "transparent" || normalized === "rgba(0, 0, 0, 0)";
-  }
-
-  function inferSchemeFromColor(value) {
-    const match = String(value || "")
-      .trim()
-      .toLowerCase()
-      .match(/^rgba?\(\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)\s*[,\s]\s*([0-9.]+)/);
-    if (!match) {
-      return "dark";
-    }
-    const red = Number.parseFloat(match[1]);
-    const green = Number.parseFloat(match[2]);
-    const blue = Number.parseFloat(match[3]);
-    const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
-    return luminance >= 0.6 ? "light" : "dark";
-  }
-}
-
 async function syncTabContext(tabId, tab, source = "") {
+  const effectiveTab = await resolveEffectiveTab(tabId, tab);
+  if (!(await isFocusedActiveTab(tabId))) {
+    return createSuccessResponse({
+      context: TAB_STATE.get(tabId) ?? buildFallbackContext(effectiveTab),
+      skipped: "inactive_tab",
+    });
+  }
   triggerContentSync(tabId).catch(() => {});
   const contextResult = await requestPageContext(tabId);
   const context = contextResult.ok
-    ? contextResult.payload?.context ?? buildFallbackContext(tab)
-    : buildFallbackContext(tab);
+    ? contextResult.payload?.context ?? buildFallbackContext(effectiveTab)
+    : buildFallbackContext(effectiveTab);
 
   TAB_STATE.set(tabId, mergeStableSelection(TAB_STATE.get(tabId), context, source));
   await syncPanelState(tabId, TAB_STATE.get(tabId));
   return contextResult;
+}
+
+async function syncTabFallbackContext(tabId, tab, source = "") {
+  if (!tabId) {
+    return;
+  }
+  if (!(await isFocusedActiveTab(tabId))) {
+    return;
+  }
+
+  const effectiveTab = await resolveEffectiveTab(tabId, tab);
+  const fallbackContext = buildFallbackContext(effectiveTab, {
+    reason: source,
+    errorMessage: "Waiting for the page content script to publish a fresh context.",
+  });
+
+  TAB_STATE.set(tabId, mergeStableSelection(TAB_STATE.get(tabId), fallbackContext, source));
+  await syncPanelState(tabId, TAB_STATE.get(tabId));
+}
+
+async function shouldSyncPanelForTab(tabId, context) {
+  if (!tabId || !(await isFocusedActiveTab(tabId))) {
+    return false;
+  }
+  return true;
+}
+
+async function isFocusedActiveTab(tabId) {
+  if (!tabId) {
+    return false;
+  }
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  return Number(tab?.id) === Number(tabId);
+}
+
+async function resolveEffectiveTab(tabId, tab) {
+  if (tab?.url) {
+    return tab;
+  }
+  return (await browser.tabs.get(tabId).catch(() => null)) ?? tab ?? {};
 }
 
 async function triggerContentSync(tabId) {
@@ -1033,6 +846,7 @@ function buildFallbackContext(tab, debug = {}) {
     title,
     selection: "",
     articleText: title && url ? `title: ${title}\nurl: ${url}` : title || url,
+    videoRAGSummary: "",
     structureSummary: "",
     interactiveSummary: "",
     interactiveTargets: [],
@@ -1055,6 +869,172 @@ function buildFallbackContext(tab, debug = {}) {
   };
 }
 
+async function probePageContextDirectly(tabId, tab) {
+  if (!tabId || typeof browser.scripting?.executeScript !== "function") {
+    return null;
+  }
+
+  try {
+    const results = await browser.scripting.executeScript({
+      target: { tabId },
+      func: directPageContextProbe,
+    });
+    const context = results?.[0]?.result;
+    if (!context || typeof context !== "object") {
+      return null;
+    }
+    return {
+      ...buildFallbackContext(tab),
+      ...context,
+      metadata: {
+        ...(context.metadata ?? {}),
+        pageContextTransport: "direct_execute_script",
+        pageContextUpdatedAt: new Date().toISOString(),
+        pageContextFallbackReason: "",
+        pageContextError: "",
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function directPageContextProbe() {
+  const normalizeText = (value, maxLength = 12000) =>
+    String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+  const isTransparent = (value) =>
+    !value ||
+    value === "transparent" ||
+    /^rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/i.test(value) ||
+    /^rgba?\(\s*0\s+0\s+0\s*\/\s*0\s*\)$/i.test(value);
+  const normalizeScheme = (value) => {
+    const parts = String(value || "").toLowerCase().split(/\s+/);
+    if (parts.includes("dark")) return "dark";
+    if (parts.includes("light")) return "light";
+    return "";
+  };
+  const inferScheme = (value) => {
+    const match = String(value || "").match(/rgba?\(\s*([0-9.]+)\s*[, ]\s*([0-9.]+)\s*[, ]\s*([0-9.]+)/i);
+    if (!match) return "dark";
+    const red = Number.parseFloat(match[1]);
+    const green = Number.parseFloat(match[2]);
+    const blue = Number.parseFloat(match[3]);
+    const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+    return luminance >= 0.6 ? "light" : "dark";
+  };
+  const detectSite = (hostname) => {
+    if (hostname.includes("github.com")) return "github";
+    if (hostname.includes("mail.google.com")) return "gmail";
+    if (hostname === "x.com" || hostname.endsWith(".x.com") || hostname.includes("twitter.com")) return "x";
+    if (hostname.includes("mail.yahoo.com")) return "yahoo_mail";
+    if (hostname === "youtube.com" || hostname.endsWith(".youtube.com") || hostname === "youtu.be") return "youtube";
+    if (hostname === "bilibili.com" || hostname.endsWith(".bilibili.com")) return "bilibili";
+    return "unsupported";
+  };
+  const inferPageKind = (site, pathname) => {
+    if (site === "x") {
+      if (/\/status\/\d+/.test(pathname)) return "x_post";
+      if (pathname === "/home") return "x_home";
+    }
+    if (site === "youtube") {
+      if (pathname === "/watch" || pathname.startsWith("/shorts/") || pathname.startsWith("/live/")) return "youtube_video";
+      return "youtube_page";
+    }
+    if (site === "bilibili") {
+      if (/\/video\//.test(pathname) || /\/BV[a-zA-Z0-9]+/.test(pathname)) return "bilibili_video";
+      return "bilibili_page";
+    }
+    if (site === "github") return "github_page";
+    if (site === "gmail") return "gmail_page";
+    if (site === "yahoo_mail") return "yahoo_mail_page";
+    return "page";
+  };
+  const describeNode = (node) => {
+    if (!node) return "unknown";
+    const id = node.id ? `#${node.id}` : "";
+    const className = String(node.className || "").trim().split(/\s+/).filter(Boolean).slice(0, 2).join(".");
+    return `${String(node.tagName || "node").toLowerCase()}${id}${className ? `.${className}` : ""}`;
+  };
+  const extractVisual = () => {
+    const candidates = [
+      document.querySelector("[data-testid='primaryColumn']"),
+      document.querySelector("main"),
+      document.querySelector("article"),
+      document.body,
+      document.documentElement,
+    ].filter(Boolean);
+    let fallbackImage = "none";
+    let fallbackScheme = "";
+    for (const candidate of candidates) {
+      let current = candidate;
+      while (current) {
+        const style = getComputedStyle(current);
+        const backgroundImage = String(style.backgroundImage || "").trim() || "none";
+        const backgroundColor = String(style.backgroundColor || "").trim();
+        const scheme = normalizeScheme(style.colorScheme);
+        if (!fallbackScheme && scheme) fallbackScheme = scheme;
+        if (fallbackImage === "none" && backgroundImage !== "none") fallbackImage = backgroundImage;
+        if (backgroundColor && !isTransparent(backgroundColor)) {
+          return {
+            backgroundColor,
+            backgroundImage: backgroundImage !== "none" ? backgroundImage : fallbackImage,
+            colorScheme: scheme || fallbackScheme || inferScheme(backgroundColor),
+            source: describeNode(current),
+          };
+        }
+        current = current.parentElement;
+      }
+    }
+    const backgroundColor = fallbackScheme === "light" ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)";
+    return {
+      backgroundColor,
+      backgroundImage: fallbackImage,
+      colorScheme: fallbackScheme || inferScheme(backgroundColor),
+      source: "direct_fallback",
+    };
+  };
+
+  const visual = extractVisual();
+  const hostname = window.location.hostname || "";
+  const site = detectSite(hostname);
+  const pageKind = inferPageKind(site, window.location.pathname || "");
+  const title = document.title || "Untitled";
+  const mainText =
+    normalizeText(document.querySelector("main")?.innerText) ||
+    normalizeText(document.querySelector("article")?.innerText) ||
+    `title: ${title}\nurl: ${window.location.href}`;
+
+  return {
+    site,
+    url: window.location.href,
+    title,
+    selection: String(window.getSelection?.()?.toString?.() ?? "").trim(),
+    articleText: mainText,
+    videoRAGSummary: "",
+    structureSummary: "",
+    interactiveSummary: "",
+    interactiveTargets: [],
+    focusedInput: null,
+    videoTranscript: [],
+    videoFrameSamples: [],
+    metadata: {
+      domain: hostname,
+      pageKind,
+      contentStrategy: "direct_visual_probe",
+      pageBackgroundColor: visual.backgroundColor,
+      pageBackgroundImage: visual.backgroundImage,
+      pageBackgroundSource: visual.source,
+      pageColorScheme: visual.colorScheme,
+      headingCount: "0",
+      interactiveCount: "0",
+      tableCount: "0",
+      codeBlockCount: "0",
+      hasIframes: document.querySelector("iframe") ? "true" : "false",
+      hasShadowHosts: "false",
+    },
+  };
+}
+
 function detectSiteFromHostname(hostname) {
   if (hostname.includes("github.com")) return "github";
   if (hostname.includes("mail.google.com")) return "gmail";
@@ -1062,6 +1042,12 @@ function detectSiteFromHostname(hostname) {
     return "x";
   }
   if (hostname.includes("mail.yahoo.com")) return "yahoo_mail";
+  if (hostname === "youtube.com" || hostname.endsWith(".youtube.com") || hostname === "youtu.be") {
+    return "youtube";
+  }
+  if (hostname === "bilibili.com" || hostname.endsWith(".bilibili.com")) {
+    return "bilibili";
+  }
   return "unsupported";
 }
 
@@ -1225,6 +1211,144 @@ async function sendNativeControlRequest(type, payload) {
       `无法连接宿主 App：${error.message}`,
       { action: type }
     );
+  }
+}
+
+async function fetchTranscriptURL(url) {
+  const normalizedURL = String(url || "").trim();
+  if (!isAllowedTranscriptURL(normalizedURL)) {
+    return createErrorResponse("invalid_transcript_url", "字幕地址不受支持");
+  }
+
+  try {
+    const response = await fetch(normalizedURL, { credentials: "include" });
+    if (!response.ok) {
+      return createErrorResponse("transcript_fetch_failed", `字幕请求失败：${response.status}`);
+    }
+    const text = await response.text();
+    return createSuccessResponse({ text });
+  } catch (error) {
+    return createErrorResponse(
+      "transcript_fetch_failed",
+      `字幕请求失败：${error?.message ?? String(error)}`
+    );
+  }
+}
+
+async function sampleVideoFramesForActiveTab() {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  return sampleVideoFramesForTab(tab?.id);
+}
+
+async function sampleVideoFramesForTab(tabId) {
+  const tab = tabId ? await browser.tabs.get(tabId).catch(() => null) : null;
+  if (!tab?.id) {
+    return createSuccessResponse({ samples: [], reason: "tab_not_found" });
+  }
+
+  const contextResult = await requestPageContext(tab.id);
+  const context = contextResult.payload?.context ?? {};
+  const duration = Number(context.metadata?.videoDurationSeconds || 0);
+  const sampleTimes = buildVideoSampleTimes(duration);
+  const samples = [];
+
+  for (const timeSeconds of sampleTimes) {
+    const prepared = await browser.tabs.sendMessage(tab.id, {
+      type: "content:prepare-video-frame-sample",
+      payload: { timeSeconds },
+    }).catch((error) => ({
+      ok: false,
+      error: { message: error?.message || String(error) },
+    }));
+    if (!prepared?.ok || prepared.payload?.prepared === false) {
+      continue;
+    }
+
+    const image = await captureVisibleTabFrame(tab.windowId);
+    if (!image) {
+      continue;
+    }
+    samples.push({
+      timestamp: prepared.payload?.timestamp || formatTimestampForFrame(timeSeconds),
+      timeSeconds: prepared.payload?.timeSeconds ?? Math.round(timeSeconds),
+      image,
+    });
+  }
+
+  const enrichedContext = {
+    ...context,
+    videoFrameSamples: samples,
+    metadata: {
+      ...(context.metadata ?? {}),
+      videoFrameSampleCount: String(samples.length),
+      videoFrameSampleSource: samples.length ? "browser_visible_tab_capture" : "",
+      pageContextTransport: "video_frame_sampling",
+      pageContextUpdatedAt: new Date().toISOString(),
+    },
+  };
+  TAB_STATE.set(tab.id, mergeStableSelection(TAB_STATE.get(tab.id), enrichedContext, "video_frame_sampling"));
+  await syncPanelState(tab.id, TAB_STATE.get(tab.id));
+  return createSuccessResponse({ samples: samples.length, context: enrichedContext });
+}
+
+function buildVideoSampleTimes(duration) {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return [0, 8, 18, 32, 52, 75].slice(0, 6);
+  }
+
+  const count = Math.min(8, Math.max(4, Math.round(duration / 90) + 3));
+  const start = Math.min(3, duration * 0.05);
+  const end = Math.max(start, duration * 0.92);
+  if (count === 1) {
+    return [start];
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const ratio = index / (count - 1);
+    return start + (end - start) * ratio;
+  });
+}
+
+async function captureVisibleTabFrame(windowId) {
+  if (typeof browser.tabs?.captureVisibleTab !== "function") {
+    return "";
+  }
+  try {
+    return await browser.tabs.captureVisibleTab(windowId, {
+      format: "jpeg",
+      quality: 58,
+    });
+  } catch {
+    return "";
+  }
+}
+
+function formatTimestampForFrame(totalSeconds) {
+  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const two = (value) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${two(minutes)}:${two(remainingSeconds)}`
+    : `${two(minutes)}:${two(remainingSeconds)}`;
+}
+
+function isAllowedTranscriptURL(value) {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    return (
+      hostname === "www.youtube.com" ||
+      hostname === "youtube.com" ||
+      hostname.endsWith(".youtube.com") ||
+      hostname === "i0.hdslb.com" ||
+      hostname === "i1.hdslb.com" ||
+      hostname === "i2.hdslb.com" ||
+      hostname.endsWith(".hdslb.com") ||
+      hostname.endsWith(".bilivideo.com")
+    );
+  } catch {
+    return false;
   }
 }
 

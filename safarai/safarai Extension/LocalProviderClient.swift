@@ -233,6 +233,7 @@ struct LocalProviderClient {
         let site = (context["site"] as? String)?.nonEmpty ?? "unknown"
         let url = (context["url"] as? String)?.nonEmpty ?? ""
         let article = (context["articleText"] as? String)?.nonEmpty ?? ""
+        let videoRAGSummary = (context["videoRAGSummary"] as? String)?.nonEmpty
         let selection = (context["selection"] as? String)?.nonEmpty ?? ""
         let selectedFocus = (context["selectedFocus"] as? String)?.nonEmpty ?? selection
         let metadata = context["metadata"] as? [String: Any]
@@ -266,6 +267,7 @@ struct LocalProviderClient {
         if let structureSummary { sections.append("structure_summary:\n\(structureSummary)") }
         if let interactiveSummary { sections.append("interactive_summary:\n\(interactiveSummary)") }
         if !article.isEmpty { sections.append("article_text:\n\(article)") }
+        if let videoRAGSummary { sections.append("video_rag_signals:\n\(videoRAGSummary)") }
 
         let header: String
         switch requestType {

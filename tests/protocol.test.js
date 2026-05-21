@@ -34,11 +34,13 @@ test("success 与 error 响应结构稳定", () => {
   });
 });
 
-test("站点识别白名单包含四个 MVP 站点", () => {
-  assert.equal(SUPPORTED_SITES.length, 4);
+test("站点识别白名单包含页面与视频目标站点", () => {
+  assert.equal(SUPPORTED_SITES.length, 6);
   assert.equal(isSupportedSite("github"), true);
   assert.equal(isSupportedSite("gmail"), true);
   assert.equal(isSupportedSite("x"), true);
   assert.equal(isSupportedSite("yahoo_mail"), true);
+  assert.equal(isSupportedSite("youtube"), true);
+  assert.equal(isSupportedSite("bilibili"), true);
   assert.equal(isSupportedSite("notion"), false);
 });

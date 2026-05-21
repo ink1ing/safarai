@@ -6,17 +6,34 @@ struct PanelConversationMessage: Codable {
     var text: String
 }
 
+struct PanelVideoTranscriptSegment: Codable {
+    var startSeconds: Double
+    var endSeconds: Double?
+    var timestamp: String
+    var text: String
+    var source: String
+}
+
+struct PanelVideoFrameSample: Codable {
+    var timestamp: String
+    var timeSeconds: Double
+    var image: String
+}
+
 struct PanelContextSnapshot: Codable {
     var site: String
     var url: String
     var title: String
     var selection: String
     var articleText: String
+    var videoRAGSummary: String?
     var structureSummary: String?
     var interactiveSummary: String?
     var metadata: [String: String]
     var debugSelection: [String: String]?
     var visualSummary: String?
+    var videoTranscript: [PanelVideoTranscriptSegment]?
+    var videoFrameSamples: [PanelVideoFrameSample]?
 }
 
 struct PanelStateSnapshot: Codable {
@@ -302,7 +319,7 @@ enum ChatHistoryStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let indexData = try encoder.encode(index)
-        try indexData.write(to: indexFileURL(rootURL: storage.rootURL), options: .atomic)
+        try SharedContainer.writePrivate(indexData, to: indexFileURL(rootURL: storage.rootURL))
     }
 
     static func exportLibrary(to folderURL: URL) throws {
@@ -368,7 +385,7 @@ enum ChatHistoryStore {
 
         let recordURL = threadFileURL(rootURL: storage.rootURL, threadID: record.id)
         let recordData = try encoder.encode(record)
-        try recordData.write(to: recordURL, options: .atomic)
+        try SharedContainer.writePrivate(recordData, to: recordURL)
 
         var index = loadIndex(in: storage.rootURL)
         let summary = makeSummary(from: record)
@@ -385,7 +402,7 @@ enum ChatHistoryStore {
         }
 
         let indexData = try encoder.encode(index)
-        try indexData.write(to: indexFileURL(rootURL: storage.rootURL), options: .atomic)
+        try SharedContainer.writePrivate(indexData, to: indexFileURL(rootURL: storage.rootURL))
     }
 
     private static func loadIndex(in rootURL: URL) -> ChatHistoryIndex {
@@ -593,10 +610,8 @@ enum ChatHistoryStore {
 
     private static func writeRawUISettings(_ payload: [String: Any]) throws {
         let url = uiSettingsURL()
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: .atomic)
+        try SharedContainer.writePrivate(data, to: url)
     }
 
     private static func uiSettingsURL() -> URL {
@@ -635,12 +650,10 @@ enum PanelStateStore {
     }
 
     static func save(_ snapshot: PanelStateSnapshot) throws {
-        let directory = stateURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(snapshot)
-        try data.write(to: stateURL, options: .atomic)
+        try SharedContainer.writePrivate(data, to: stateURL)
     }
 
     static func updateStatus(_ status: String?) {

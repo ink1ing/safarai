@@ -18,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var reopenedMainWindowController: NSWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installStandardEditMenuIfNeeded()
         NSAppleEventManager.shared().setEventHandler(
             self,
             andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
@@ -25,6 +26,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             andEventID: AEEventID(kAEGetURL)
         )
         startLoginRequestPolling()
+    }
+
+    private func installStandardEditMenuIfNeeded() {
+        guard let mainMenu = NSApp.mainMenu else {
+            return
+        }
+        if mainMenu.items.contains(where: { $0.submenu?.title == "Edit" || $0.title == "Edit" }) {
+            return
+        }
+
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+
+        editMenu.addItem(
+            NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        )
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
+
+        editMenu.addItem(
+            NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        )
+        editMenu.addItem(
+            NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        )
+        editMenu.addItem(
+            NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        )
+        editMenu.addItem(.separator())
+        editMenu.addItem(
+            NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        )
+
+        let insertIndex = min(1, mainMenu.numberOfItems)
+        mainMenu.insertItem(editItem, at: insertIndex)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

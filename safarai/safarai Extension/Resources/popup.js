@@ -225,7 +225,7 @@ function renderConversation(messages) {
 
   for (const item of messages) {
     const entry = document.createElement("div");
-    const role = item.role || "system";
+    const role = normalizeRole(item.role);
     entry.className = `conversation-item conversation-item--${role}`;
     entry.dataset.role = role;
     entry.innerHTML = `
@@ -320,7 +320,14 @@ function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function normalizeRole(value) {
+  const role = String(value || "system").trim().toLowerCase();
+  return ["user", "assistant", "system", "error"].includes(role) ? role : "system";
 }
 
 function truncate(value, limit) {

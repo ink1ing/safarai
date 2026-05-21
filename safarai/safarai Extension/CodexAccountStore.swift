@@ -43,12 +43,10 @@ enum NativeCodexAccountStore {
 
     static func save(_ configuration: NativeCodexAccountConfiguration) throws {
         let url = configURL()
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(configuration)
-        try data.write(to: url, options: .atomic)
+        try NativeSharedContainer.writePrivate(data, to: url)
     }
 
     static func clear() throws {

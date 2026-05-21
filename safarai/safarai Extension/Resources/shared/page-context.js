@@ -3,6 +3,9 @@ import { describeWriteTarget, isWritableElement, resolveWritableTarget } from ".
 const MAX_ARTICLE_TEXT_LENGTH = 12_000;
 const MAX_INTERACTIVE_SUMMARY_ITEMS = 12;
 const MAX_INTERACTIVE_TARGETS = 20;
+const MAX_VIDEO_TRANSCRIPT_SEGMENTS = 240;
+const MAX_VIDEO_TRANSCRIPT_TEXT_LENGTH = 360;
+const MAX_VIDEO_RAG_SIGNAL_LENGTH = 6000;
 const TRAVERSAL_SKIP_TAGS = new Set([
   "script",
   "style",
@@ -52,7 +55,12 @@ export function extractPageContext(win, doc) {
   const domain = normalizeHostname(win.location.hostname);
 
   const selection = normalizeWhitespace(win.getSelection?.()?.toString?.() ?? "");
-  const metadata = adapter.extractMetadata(win.location.pathname, doc);
+  const videoContext = extractVideoContext(win, doc, site);
+  const videoRAGSummary = buildVideoRAGSummary(doc, site);
+  const metadata = {
+    ...adapter.extractMetadata(win.location.pathname, doc),
+    ...videoContext.metadata,
+  };
   const rootSelection = selectContentRoot(win, doc, adapter);
   const articleExtraction = buildArticleText(win, doc, rootSelection, adapter);
   const pageVisual = extractPageVisualState(win, doc, rootSelection.root);
@@ -82,6 +90,8 @@ export function extractPageContext(win, doc) {
     title: doc.title || "Untitled",
     selection,
     articleText: articleExtraction.text,
+    videoTranscript: videoContext.transcript,
+    videoRAGSummary,
     structureSummary,
     interactiveSummary,
     interactiveTargets,
@@ -118,6 +128,12 @@ export function detectSite(hostname) {
     return "x";
   }
   if (hostname.includes("mail.yahoo.com")) return "yahoo_mail";
+  if (hostname === "youtube.com" || hostname.endsWith(".youtube.com") || hostname === "youtu.be") {
+    return "youtube";
+  }
+  if (hostname === "bilibili.com" || hostname.endsWith(".bilibili.com")) {
+    return "bilibili";
+  }
   return "unsupported";
 }
 
@@ -131,6 +147,10 @@ function getSiteAdapter(site) {
       return xAdapter;
     case "yahoo_mail":
       return yahooMailAdapter;
+    case "youtube":
+      return youtubeAdapter;
+    case "bilibili":
+      return bilibiliAdapter;
     default:
       return genericAdapter;
   }
@@ -335,6 +355,140 @@ const yahooMailAdapter = {
   },
 };
 
+const youtubeAdapter = {
+  getContentRoots(doc) {
+    return buildCandidateRoots(doc, [
+      {
+        selector: "ytd-transcript-renderer",
+        strategy: "youtube_transcript",
+        label: "youtube-transcript",
+        priority: 3200,
+      },
+      {
+        selector: "ytd-engagement-panel-section-list-renderer[target-id='engagement-panel-searchable-transcript']",
+        strategy: "youtube_transcript_panel",
+        label: "youtube-transcript-panel",
+        priority: 3100,
+      },
+      { selector: "#description", strategy: "youtube_description", label: "#description", priority: 1800 },
+      { selector: "#primary", strategy: "youtube_primary", label: "#primary", priority: 700 },
+      { selector: "ytd-watch-flexy", strategy: "youtube_watch", label: "ytd-watch-flexy", priority: 600 },
+      { selector: "main", strategy: "youtube_main", label: "main", priority: 420 },
+      { node: doc.body, strategy: "youtube_body", label: "body", priority: 0 },
+    ]);
+  },
+
+  extractArticleText(doc) {
+    return buildVideoPageText(doc, {
+      titleSelectors: ["h1.ytd-watch-metadata", "h1.title", "h1"],
+      authorSelectors: [
+        "#owner #channel-name",
+        "#upload-info #channel-name",
+        "ytd-channel-name",
+        "[itemprop='author']",
+      ],
+      descriptionSelectors: ["#description-inline-expander", "#description", "ytd-text-inline-expander"],
+      chapterSelectors: [
+        "ytd-macro-markers-list-item-renderer",
+        "ytd-expandable-metadata-renderer ytd-metadata-row-renderer",
+        "#description a[href*='t=']",
+      ],
+      commentSelectors: [
+        "ytd-comment-thread-renderer #content-text",
+        "ytd-comment-renderer #content-text",
+        "#comments #content-text",
+      ],
+      transcriptSelectors: [
+        "ytd-transcript-segment-renderer",
+        ".segment-text",
+        "yt-formatted-string.segment-text",
+        "[class*='segment-text']",
+      ],
+      fallbackSelectors: ["#primary", "ytd-watch-flexy", "main", "body"],
+    });
+  },
+
+  extractMetadata(pathname, doc) {
+    return {
+      pageKind: inferYouTubePageKind(pathname),
+      videoTitle: firstMeaningfulText(doc, ["h1.ytd-watch-metadata", "h1.title", "h1"]),
+      videoAuthor: firstMeaningfulText(doc, [
+        "#owner #channel-name",
+        "#upload-info #channel-name",
+        "ytd-channel-name",
+        "[itemprop='author']",
+      ]),
+      hasTranscript: collectMeaningfulTexts(doc, [
+        "ytd-transcript-segment-renderer",
+        ".segment-text",
+        "yt-formatted-string.segment-text",
+      ], 1).length > 0,
+    };
+  },
+};
+
+const bilibiliAdapter = {
+  getContentRoots(doc) {
+    return buildCandidateRoots(doc, [
+      {
+        selector: ".bpx-player-subtitle-panel",
+        strategy: "bilibili_subtitle_panel",
+        label: "bilibili-subtitle-panel",
+        priority: 3200,
+      },
+      {
+        selector: ".bpx-player-subtitle-current-text",
+        strategy: "bilibili_current_subtitle",
+        label: "bilibili-current-subtitle",
+        priority: 3000,
+      },
+      { selector: ".video-desc", strategy: "bilibili_description", label: ".video-desc", priority: 1800 },
+      { selector: ".video-info", strategy: "bilibili_info", label: ".video-info", priority: 1200 },
+      { selector: "#viewbox_report", strategy: "bilibili_viewbox", label: "viewbox-report", priority: 1000 },
+      { selector: "main", strategy: "bilibili_main", label: "main", priority: 420 },
+      { node: doc.body, strategy: "bilibili_body", label: "body", priority: 0 },
+    ]);
+  },
+
+  extractArticleText(doc) {
+    return buildVideoPageText(doc, {
+      titleSelectors: [".video-title", "h1.video-title", "h1"],
+      authorSelectors: [".up-name", ".username", ".name", "[class*='up-name']"],
+      descriptionSelectors: [".video-desc", ".desc-info", "[class*='desc']"],
+      chapterSelectors: [
+        ".video-sections-content-list .video-section-list-item",
+        "[class*='chapter']",
+        "[class*='section']",
+      ],
+      commentSelectors: [
+        ".reply-content",
+        ".comment-content",
+        "[class*='reply-content']",
+      ],
+      transcriptSelectors: [
+        ".bpx-player-subtitle-panel-text",
+        ".bpx-player-subtitle-current-text",
+        ".subtitle-item",
+        "[class*='subtitle']",
+      ],
+      fallbackSelectors: [".video-info", "#viewbox_report", "main", "body"],
+    });
+  },
+
+  extractMetadata(pathname, doc) {
+    return {
+      pageKind: inferBilibiliPageKind(pathname),
+      videoTitle: firstMeaningfulText(doc, [".video-title", "h1.video-title", "h1"]),
+      videoAuthor: firstMeaningfulText(doc, [".up-name", ".username", ".name", "[class*='up-name']"]),
+      hasTranscript: collectMeaningfulTexts(doc, [
+        ".bpx-player-subtitle-panel-text",
+        ".bpx-player-subtitle-current-text",
+        ".subtitle-item",
+      ], 1).length > 0,
+    };
+  },
+};
+
 function buildCandidateRoots(doc, specs) {
   return specs
     .map((spec) => {
@@ -526,17 +680,29 @@ function buildStructureSummary({ rootSelection, metadata, contentStrategy, pageA
     `page_signals: interactives=${pageAnalysis.interactiveCount}, iframes=${pageAnalysis.hasIframes}, shadow_hosts=${pageAnalysis.hasShadowHosts}`,
   ];
 
-  if (metadata.repository || metadata.pageKind || metadata.mainTab || metadata.statePills || metadata.primaryActions) {
-    const githubParts = [
+  if (
+    metadata.repository ||
+    metadata.pageKind ||
+    metadata.mainTab ||
+    metadata.statePills ||
+    metadata.primaryActions ||
+    metadata.videoTitle ||
+    metadata.videoAuthor ||
+    metadata.hasTranscript != null
+  ) {
+    const contextParts = [
       metadata.repository ? `repository=${metadata.repository}` : null,
       metadata.pageKind ? `page=${metadata.pageKind}` : null,
       metadata.mainTab ? `tab=${metadata.mainTab}` : null,
       metadata.statePills ? `state=${metadata.statePills}` : null,
       metadata.primaryActions ? `actions=${metadata.primaryActions}` : null,
+      metadata.videoTitle ? `video=${metadata.videoTitle}` : null,
+      metadata.videoAuthor ? `author=${metadata.videoAuthor}` : null,
+      metadata.hasTranscript != null ? `has_transcript=${metadata.hasTranscript}` : null,
     ].filter(Boolean);
 
-    if (githubParts.length) {
-      lines.push(`page_context: ${githubParts.join(" ; ")}`);
+    if (contextParts.length) {
+      lines.push(`page_context: ${contextParts.join(" ; ")}`);
     }
   }
 
@@ -961,6 +1127,377 @@ function inferYahooMailPageKind(pathname) {
   }
 
   return "yahoo_mailbox";
+}
+
+function inferYouTubePageKind(pathname) {
+  if (pathname === "/watch" || pathname.startsWith("/shorts/") || pathname.startsWith("/live/")) {
+    return "youtube_video";
+  }
+
+  return "youtube_page";
+}
+
+function inferBilibiliPageKind(pathname) {
+  if (/\/video\//.test(pathname) || /\/BV[a-zA-Z0-9]+/.test(pathname)) {
+    return "bilibili_video";
+  }
+
+  return "bilibili_page";
+}
+
+function extractVideoContext(win, doc, site) {
+  const primaryVideo = findPrimaryVideo(win, doc);
+  const domTranscript = extractDOMVideoTranscript(doc, site);
+  const trackTranscript = extractTextTrackTranscript(primaryVideo);
+  const visibleTranscript = extractVisibleSubtitleTranscript(doc, site, primaryVideo);
+  const transcript = normalizeVideoTranscript([
+    ...domTranscript,
+    ...trackTranscript,
+    ...visibleTranscript,
+  ]);
+  const transcriptSource = transcript[0]?.source ?? "";
+  const duration = normalizeVideoNumber(primaryVideo?.duration);
+  const currentTime = normalizeVideoNumber(primaryVideo?.currentTime);
+
+  return {
+    transcript,
+    metadata: {
+      hasPrimaryVideo: primaryVideo ? "true" : "false",
+      videoDurationSeconds: duration == null ? "" : String(Math.round(duration)),
+      videoCurrentTimeSeconds: currentTime == null ? "" : String(Math.round(currentTime)),
+      videoTranscriptCount: String(transcript.length),
+      videoTranscriptSource: transcriptSource,
+      hasTranscript: transcript.length > 0 ? "true" : "false",
+    },
+  };
+}
+
+function findPrimaryVideo(win, doc) {
+  const videos = Array.from(doc.querySelectorAll?.("video") || []);
+  if (!videos.length) {
+    return null;
+  }
+
+  return videos
+    .map((video, index) => {
+      const rect = getNodeRect(video) ?? { width: 0, height: 0 };
+      const area = Math.max(0, rect.width || 0) * Math.max(0, rect.height || 0);
+      const visible = isNodeVisible(win, video) && area > 0;
+      return { video, index, area: visible ? area : 0 };
+    })
+    .sort((left, right) => {
+      if (left.area !== right.area) return right.area - left.area;
+      return left.index - right.index;
+    })[0]?.video ?? null;
+}
+
+function extractDOMVideoTranscript(doc, site) {
+  if (site === "youtube") {
+    return extractTimestampedNodes(doc, [
+      "ytd-transcript-segment-renderer",
+      "ytd-transcript-segment-list-renderer [role='button']",
+      "[class*='transcript'] [class*='segment']",
+    ], "youtube_transcript_dom");
+  }
+
+  if (site === "bilibili") {
+    return extractTimestampedNodes(doc, [
+      ".bpx-player-subtitle-panel-text",
+      ".subtitle-item",
+      "[class*='subtitle']",
+    ], "bilibili_subtitle_dom");
+  }
+
+  return extractTimestampedNodes(doc, [
+    "[data-start-time]",
+    "[data-start]",
+    "[class*='transcript']",
+    "[class*='subtitle']",
+  ], "generic_video_dom");
+}
+
+function extractTimestampedNodes(doc, selectors, source) {
+  const nodes = [];
+  for (const selector of selectors) {
+    for (const node of Array.from(doc.querySelectorAll?.(selector) || [])) {
+      if (!nodes.includes(node)) {
+        nodes.push(node);
+      }
+    }
+  }
+
+  return nodes
+    .map((node) => parseTranscriptNode(node, source))
+    .filter(Boolean);
+}
+
+function parseTranscriptNode(node, source) {
+  const rawText = normalizeWhitespace(readNodeText(node));
+  if (!rawText) {
+    return null;
+  }
+
+  const attrStart =
+    parseOptionalNumber(readAttribute(node, "data-start-time")) ??
+    parseOptionalNumber(readAttribute(node, "data-start")) ??
+    parseOptionalNumber(readAttribute(node, "data-time"));
+  const timestampMatch = rawText.match(/(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?)(?:\s|$)/);
+  const startSeconds = attrStart ?? parseTimestampSeconds(timestampMatch?.[1] ?? "");
+  let text = rawText;
+  if (timestampMatch) {
+    text = normalizeWhitespace(rawText.replace(timestampMatch[1], ""));
+  }
+  if (!text || startSeconds == null) {
+    return null;
+  }
+
+  return makeTranscriptSegment(startSeconds, null, text, source);
+}
+
+function extractTextTrackTranscript(video) {
+  const tracks = Array.from(video?.textTracks || []);
+  for (const track of tracks) {
+    const cues = Array.from(track?.cues || track?.activeCues || []);
+    const segments = cues
+      .map((cue) =>
+        makeTranscriptSegment(
+          normalizeVideoNumber(cue.startTime) ?? 0,
+          normalizeVideoNumber(cue.endTime),
+          cue.text ?? "",
+          "text_track"
+        )
+      )
+      .filter((segment) => segment.text);
+    if (segments.length) {
+      return segments;
+    }
+  }
+  return [];
+}
+
+function extractVisibleSubtitleTranscript(doc, site, video) {
+  const currentTime = normalizeVideoNumber(video?.currentTime) ?? 0;
+  const selectors =
+    site === "youtube"
+      ? [".ytp-caption-segment", ".caption-window"]
+      : site === "bilibili"
+        ? [".bpx-player-subtitle-current-text", ".bpx-player-subtitle-panel-text"]
+        : ["[class*='caption']", "[class*='subtitle']"];
+
+  return collectMeaningfulTexts(doc, selectors, 8)
+    .map((text) => makeTranscriptSegment(currentTime, null, text, "visible_subtitle"))
+    .filter((segment) => segment.text);
+}
+
+function normalizeVideoTranscript(segments) {
+  const seen = new Set();
+  return segments
+    .filter((segment) => segment && segment.text && segment.startSeconds != null)
+    .sort((left, right) => left.startSeconds - right.startSeconds)
+    .filter((segment) => {
+      const key = `${Math.round(segment.startSeconds)}:${segment.text}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_VIDEO_TRANSCRIPT_SEGMENTS);
+}
+
+function makeTranscriptSegment(startSeconds, endSeconds, text, source) {
+  const normalizedStart = Math.max(0, Math.round(Number(startSeconds) || 0));
+  const normalizedEnd = endSeconds == null ? null : Math.max(normalizedStart, Math.round(Number(endSeconds) || 0));
+  return {
+    startSeconds: normalizedStart,
+    ...(normalizedEnd == null ? {} : { endSeconds: normalizedEnd }),
+    timestamp: formatTimestamp(normalizedStart),
+    text: normalizeWhitespace(String(text || "")).slice(0, MAX_VIDEO_TRANSCRIPT_TEXT_LENGTH),
+    source,
+  };
+}
+
+function parseTimestampSeconds(value) {
+  const parts = String(value || "")
+    .trim()
+    .split(":")
+    .map((part) => Number.parseInt(part, 10));
+  if (parts.some((part) => Number.isNaN(part))) {
+    return null;
+  }
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  return null;
+}
+
+function formatTimestamp(totalSeconds) {
+  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const two = (value) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${two(minutes)}:${two(remainingSeconds)}`
+    : `${two(minutes)}:${two(remainingSeconds)}`;
+}
+
+function normalizeVideoNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function parseOptionalNumber(value) {
+  const number = Number.parseFloat(String(value ?? ""));
+  return Number.isFinite(number) ? number : null;
+}
+
+function buildVideoPageText(doc, spec) {
+  const sections = [];
+  const title = firstMeaningfulText(doc, spec.titleSelectors ?? []);
+  const author = firstMeaningfulText(doc, spec.authorSelectors ?? []);
+  const description = firstMeaningfulText(doc, spec.descriptionSelectors ?? []);
+  const chapters = collectTimestampSignals(doc, spec.chapterSelectors ?? []);
+  const comments = collectCommentSignals(doc, spec.commentSelectors ?? []);
+  const transcript = collectMeaningfulTexts(doc, spec.transcriptSelectors ?? [], 80).join("\n");
+
+  if (title) sections.push(`video_title: ${title}`);
+  if (author) sections.push(`video_author: ${author}`);
+  if (description) sections.push(`video_description:\n${description}`);
+  if (chapters.length) sections.push(`video_chapters_or_moments:\n${chapters.join("\n")}`);
+  if (comments.length) sections.push(`comment_attention_signals:\n${comments.join("\n")}`);
+  if (transcript) sections.push(`video_transcript_or_visible_subtitles:\n${transcript}`);
+
+  const combined = sections.join("\n\n").trim();
+  if (combined.length >= 40) {
+    return combined.slice(0, MAX_ARTICLE_TEXT_LENGTH);
+  }
+
+  const fallbackNodes = (spec.fallbackSelectors ?? [])
+    .map((selector) => doc.querySelector?.(selector))
+    .filter(Boolean);
+  return pickFirstMeaningfulText(fallbackNodes);
+}
+
+function buildVideoRAGSummary(doc, site) {
+  const spec =
+    site === "youtube"
+      ? {
+          descriptionSelectors: ["#description-inline-expander", "#description", "ytd-text-inline-expander"],
+          chapterSelectors: [
+            "ytd-macro-markers-list-item-renderer",
+            "ytd-expandable-metadata-renderer ytd-metadata-row-renderer",
+            "#description a[href*='t=']",
+            "#description yt-formatted-string",
+          ],
+          commentSelectors: [
+            "ytd-comment-thread-renderer #content-text",
+            "ytd-comment-renderer #content-text",
+            "#comments #content-text",
+          ],
+        }
+      : site === "bilibili"
+        ? {
+            descriptionSelectors: [".video-desc", ".desc-info", "[class*='desc']"],
+            chapterSelectors: [".video-sections-content-list .video-section-list-item", "[class*='chapter']", "[class*='section']"],
+            commentSelectors: [".reply-content", ".comment-content", "[class*='reply-content']"],
+          }
+        : {
+            descriptionSelectors: ["[class*='description']", "[class*='desc']"],
+            chapterSelectors: ["[class*='chapter']", "[class*='marker']", "a[href*='t=']"],
+            commentSelectors: ["[class*='comment']"],
+          };
+
+  const sections = [];
+  const description = collectMeaningfulTexts(doc, spec.descriptionSelectors, 3).join("\n");
+  const timestampSignals = collectTimestampSignals(doc, [
+    ...spec.descriptionSelectors,
+    ...spec.chapterSelectors,
+  ]);
+  const comments = collectCommentSignals(doc, spec.commentSelectors);
+
+  if (description) {
+    sections.push(`metadata_description:\n${description}`);
+  }
+  if (timestampSignals.length) {
+    sections.push(`salient_timestamp_signals:\n${timestampSignals.join("\n")}`);
+  }
+  if (comments.length) {
+    sections.push(`collective_attention_signals:\n${comments.join("\n")}`);
+  }
+
+  return sections.join("\n\n").slice(0, MAX_VIDEO_RAG_SIGNAL_LENGTH);
+}
+
+function collectTimestampSignals(doc, selectors) {
+  const seen = new Set();
+  const signals = [];
+  for (const selector of selectors) {
+    for (const node of Array.from(doc.querySelectorAll?.(selector) || [])) {
+      const text = normalizeWhitespace(readNodeText(node));
+      if (!hasTimestamp(text) || seen.has(text)) {
+        continue;
+      }
+      seen.add(text);
+      signals.push(text.slice(0, 220));
+      if (signals.length >= 24) {
+        return rankTimestampSignals(signals);
+      }
+    }
+  }
+  return rankTimestampSignals(signals);
+}
+
+function collectCommentSignals(doc, selectors) {
+  const seen = new Set();
+  const comments = [];
+  for (const selector of selectors) {
+    for (const node of Array.from(doc.querySelectorAll?.(selector) || [])) {
+      const text = normalizeWhitespace(readNodeText(node));
+      if (text.length < 18 || seen.has(text)) {
+        continue;
+      }
+      seen.add(text);
+      comments.push(text.slice(0, 240));
+      if (comments.length >= 18) {
+        return rankCommentSignals(comments);
+      }
+    }
+  }
+  return rankCommentSignals(comments);
+}
+
+function rankTimestampSignals(items) {
+  return items
+    .map((text) => ({ text, score: saliencyScore(text) + 8 }))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 12)
+    .map((item) => item.text);
+}
+
+function rankCommentSignals(items) {
+  return items
+    .map((text) => ({ text, score: saliencyScore(text) + (hasTimestamp(text) ? 4 : 0) }))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 10)
+    .map((item) => item.text);
+}
+
+function saliencyScore(text) {
+  const value = String(text || "");
+  const timestampBonus = hasTimestamp(value) ? 8 : 0;
+  const entityBonus = Math.min(12, (value.match(/[A-Z][a-z]+|[\u4e00-\u9fff]{2,}/g) || []).length * 2);
+  const numberBonus = Math.min(6, (value.match(/\d+/g) || []).length);
+  const quoteBonus = /["“”'‘’]/.test(value) ? 3 : 0;
+  const actionBonus = /(出现|发生|宣布|决定|攻击|逮捕|死亡|抗议|演讲|解释|reveals?|shows?|announces?|dies?|killed|protest|speech|decision)/i.test(value) ? 5 : 0;
+  return timestampBonus + entityBonus + numberBonus + quoteBonus + actionBonus + Math.min(5, value.length / 80);
+}
+
+function hasTimestamp(text) {
+  return /(?:^|\D)(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\D|$)/.test(String(text || ""));
 }
 
 function buildStructuredPageText(doc) {
