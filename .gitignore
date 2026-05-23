@@ -8,4 +8,5 @@ node_modules/
 
 .build/
 opencode.json
-video-summary-requirements.mdopencode.json
+video-summary-requirements.md
+opencode.json
