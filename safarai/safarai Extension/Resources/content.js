@@ -670,27 +670,59 @@ async function fetchYouTubeTranscript() {
 }
 
 let lastYouTubeTranscriptDebug = "";
+const YOUTUBE_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
-// Delegate the InnerTube calls to the background script: it holds the youtube.com host
-// permission, so its fetch is privileged and not blocked by page CORS.
+// Fetch from the YouTube page context (same-origin): the request carries the page's
+// origin, referer and cookies, so youtubei accepts it. A background fetch is rejected
+// with 403 because it lacks the youtube.com origin. /next holds the transcript params.
 async function fetchYouTubeTranscriptViaInnerTube() {
   const videoId = getYouTubeVideoId();
   if (!videoId) {
     lastYouTubeTranscriptDebug = "no_video_id";
     return [];
   }
+  const context = {
+    client: { clientName: "WEB", clientVersion: "2.20240826.01.00", hl: navigator.language?.slice(0, 2) || "en", gl: "US" },
+  };
+  let debug = "";
   try {
-    const response = await browser.runtime.sendMessage({
-      type: "content:youtube-transcript",
-      payload: { videoId },
-    });
-    lastYouTubeTranscriptDebug = String(response?.payload?.debug || response?.error?.message || "");
-    const segments = response?.payload?.segments;
-    return Array.isArray(segments) ? segments : [];
+    const nextRes = await youtubeInnerTubePost("next", { context, videoId });
+    debug = `next=${nextRes.status}`;
+    if (!nextRes.ok) { lastYouTubeTranscriptDebug = debug; return []; }
+    const params = findKeyDeep(await nextRes.json(), "getTranscriptEndpoint")?.params;
+    debug += ` params=${params ? "yes" : "no"}`;
+    if (!params) { lastYouTubeTranscriptDebug = debug; return []; }
+    const trRes = await youtubeInnerTubePost("get_transcript", { context, params });
+    debug += ` get=${trRes.status}`;
+    if (!trRes.ok) { lastYouTubeTranscriptDebug = debug; return []; }
+    const rawSegments = findKeyDeep(await trRes.json(), "initialSegments");
+    const segments = (Array.isArray(rawSegments) ? rawSegments : [])
+      .map((entry) => {
+        const seg = entry?.transcriptSegmentRenderer;
+        const startMs = Number(seg?.startMs);
+        const text = Array.isArray(seg?.snippet?.runs)
+          ? seg.snippet.runs.map((run) => run?.text || "").join("")
+          : seg?.snippet?.simpleText || "";
+        if (!text.trim() || !Number.isFinite(startMs)) return null;
+        return makeTranscriptSegmentFromMilliseconds(startMs, seg.endMs == null ? null : Number(seg.endMs), text.trim(), "youtube_caption");
+      })
+      .filter(Boolean);
+    debug += ` segs=${segments.length}`;
+    lastYouTubeTranscriptDebug = debug;
+    return segments;
   } catch (error) {
-    lastYouTubeTranscriptDebug = `send_failed:${error?.message || error}`;
+    lastYouTubeTranscriptDebug = `${debug} error=${error?.message || error}`;
     return [];
   }
+}
+
+async function youtubeInnerTubePost(endpoint, body) {
+  return fetch(`https://www.youtube.com/youtubei/v1/${endpoint}?key=${YOUTUBE_INNERTUBE_KEY}&prettyPrint=false`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 function getYouTubeVideoId() {

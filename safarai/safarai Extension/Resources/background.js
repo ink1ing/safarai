@@ -151,8 +151,6 @@ browser.runtime.onMessage.addListener((message, sender) => {
       return syncPanelStateFromContent(sender.tab?.id, message.payload?.context);
     case "content:fetch-transcript-url":
       return fetchTranscriptURL(message.payload?.url);
-    case "content:youtube-transcript":
-      return fetchYouTubeTranscriptInner(message.payload?.videoId);
     case "content:sample-video-frames":
       return sampleVideoFramesForTab(sender.tab?.id);
     default:
@@ -1235,77 +1233,6 @@ async function fetchTranscriptURL(url) {
       `字幕请求失败：${error?.message ?? String(error)}`
     );
   }
-}
-
-const YOUTUBE_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-
-async function youtubeInnerTubePost(endpoint, body) {
-  return fetch(`https://www.youtube.com/youtubei/v1/${endpoint}?key=${YOUTUBE_INNERTUBE_KEY}&prettyPrint=false`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
-
-function findKeyDeep(value, targetKey, seen = new Set()) {
-  if (!value || typeof value !== "object" || seen.has(value)) return undefined;
-  seen.add(value);
-  if (!Array.isArray(value) && value[targetKey] !== undefined) return value[targetKey];
-  for (const child of Array.isArray(value) ? value : Object.values(value)) {
-    const found = findKeyDeep(child, targetKey, seen);
-    if (found !== undefined) return found;
-  }
-  return undefined;
-}
-
-// InnerTube transcript runs here (not in the content script) so it uses the extension's
-// youtube.com host permission and is not subject to page CORS. /next holds the transcript
-// continuation params; /get_transcript returns the timed segments.
-async function fetchYouTubeTranscriptInner(videoId) {
-  const id = String(videoId || "").trim();
-  if (!id) {
-    return createSuccessResponse({ segments: [], debug: "no_video_id" });
-  }
-  const context = { client: { clientName: "WEB", clientVersion: "2.20240826.01.00", hl: "en", gl: "US" } };
-  let debug = "";
-  try {
-    const nextRes = await youtubeInnerTubePost("next", { context, videoId: id });
-    debug = `next=${nextRes.status}`;
-    if (!nextRes.ok) return logYouTubeTranscript(debug, []);
-    const params = findKeyDeep(await nextRes.json(), "getTranscriptEndpoint")?.params;
-    debug += ` params=${params ? "yes" : "no"}`;
-    if (!params) return logYouTubeTranscript(debug, []);
-    const trRes = await youtubeInnerTubePost("get_transcript", { context, params });
-    debug += ` get=${trRes.status}`;
-    if (!trRes.ok) return logYouTubeTranscript(debug, []);
-    const rawSegments = findKeyDeep(await trRes.json(), "initialSegments");
-    const segments = (Array.isArray(rawSegments) ? rawSegments : [])
-      .map((entry) => {
-        const seg = entry?.transcriptSegmentRenderer;
-        const startMs = Number(seg?.startMs);
-        const text = Array.isArray(seg?.snippet?.runs)
-          ? seg.snippet.runs.map((r) => r?.text || "").join("")
-          : seg?.snippet?.simpleText || "";
-        if (!text.trim() || !Number.isFinite(startMs)) return null;
-        return {
-          startSeconds: startMs / 1000,
-          endSeconds: seg.endMs == null ? null : Number(seg.endMs) / 1000,
-          timestamp: formatTimestampForFrame(startMs / 1000),
-          text: text.trim(),
-          source: "youtube_caption",
-        };
-      })
-      .filter(Boolean);
-    debug += ` segs=${segments.length}`;
-    return logYouTubeTranscript(debug, segments);
-  } catch (error) {
-    return logYouTubeTranscript(`${debug} error=${error?.message || String(error)}`, []);
-  }
-}
-
-function logYouTubeTranscript(debug, segments) {
-  console.log("[safarai] youtube transcript", debug);
-  return createSuccessResponse({ segments, debug });
 }
 
 async function sampleVideoFramesForActiveTab() {
