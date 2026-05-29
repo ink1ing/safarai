@@ -49,7 +49,8 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             WindowPlacementCoordinator.restoreOrSnap(
                 window,
                 autosaveName: "MainChatWindow",
-                placementMode: loadPlacementMode()
+                placementMode: loadPlacementMode(),
+                followSafariWindow: loadFollowSafariWindow()
             )
             if safariWindowFollower == nil {
                 safariWindowFollower = SafariWindowFollower(
@@ -1318,6 +1319,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 window,
                 autosaveName: "MainChatWindow",
                 placementMode: loadPlacementMode(),
+                followSafariWindow: loadFollowSafariWindow(),
                 animated: true
             )
             safariWindowFollower?.refreshMode()

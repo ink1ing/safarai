@@ -16,9 +16,16 @@ enum WindowPlacementCoordinator {
         _ window: NSWindow,
         autosaveName: String,
         placementMode: PlacementMode,
+        followSafariWindow: Bool = false,
         animated: Bool = false
     ) {
         window.setFrameAutosaveName(autosaveName)
+
+        if followSafariWindow, let safariFrame = safariWindowFrame() {
+            UserDefaults.standard.removeObject(forKey: "NSWindow Frame \(autosaveName)")
+            snapBesideSafariFrame(window, safariFrame: safariFrame, mode: placementMode, animated: animated)
+            return
+        }
 
         switch placementMode {
         case .remember:
@@ -180,7 +187,7 @@ enum WindowPlacementCoordinator {
     private static func safariWindowFrame() -> CGRect? {
         guard
             let infoList = CGWindowListCopyWindowInfo(
-                [.optionOnScreenOnly], kCGNullWindowID
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
             ) as? [[String: Any]]
         else {
             return nil
@@ -196,18 +203,56 @@ enum WindowPlacementCoordinator {
                 let width  = bounds["Width"],
                 let height = bounds["Height"],
                 width  > 400,
-                height > 400
+                height > 400,
+                let rawLayer = item[kCGWindowLayer as String] as? Int,
+                rawLayer == 0
             else { continue }
 
-            let appKitY = appKitGlobalMaxY() - y - height
-            return CGRect(x: x, y: appKitY, width: width, height: height)
+            let cgFrame = CGRect(x: x, y: y, width: width, height: height)
+            return appKitFrame(fromCGWindowFrame: cgFrame)
         }
 
         return nil
     }
 
-    private static func appKitGlobalMaxY() -> CGFloat {
-        NSScreen.screens.map(\.frame.maxY).max() ?? 0
+    private static func appKitFrame(fromCGWindowFrame cgFrame: CGRect) -> CGRect {
+        let screen = screenContainingCGWindowFrame(cgFrame) ?? NSScreen.main
+        guard let screen else {
+            let globalMaxY = NSScreen.screens.map(\.frame.maxY).max() ?? 0
+            return CGRect(
+                x: cgFrame.minX,
+                y: globalMaxY - cgFrame.maxY,
+                width: cgFrame.width,
+                height: cgFrame.height
+            )
+        }
+
+        let appKitY = screen.frame.maxY - (cgFrame.minY - screenCGMinY(screen)) - cgFrame.height
+        return CGRect(x: cgFrame.minX, y: appKitY, width: cgFrame.width, height: cgFrame.height)
+    }
+
+    private static func screenContainingCGWindowFrame(_ cgFrame: CGRect) -> NSScreen? {
+        NSScreen.screens.max {
+            cgWindowIntersectionArea(cgFrame, screen: $0) < cgWindowIntersectionArea(cgFrame, screen: $1)
+        }
+    }
+
+    private static func cgWindowIntersectionArea(_ cgFrame: CGRect, screen: NSScreen) -> CGFloat {
+        cgFrame.intersection(cgFrameForScreen(screen)).area
+    }
+
+    private static func cgFrameForScreen(_ screen: NSScreen) -> CGRect {
+        let globalMaxY = NSScreen.screens.map(\.frame.maxY).max() ?? screen.frame.maxY
+        return CGRect(
+            x: screen.frame.minX,
+            y: globalMaxY - screen.frame.maxY,
+            width: screen.frame.width,
+            height: screen.frame.height
+        )
+    }
+
+    private static func screenCGMinY(_ screen: NSScreen) -> CGFloat {
+        cgFrameForScreen(screen).minY
     }
 }
 

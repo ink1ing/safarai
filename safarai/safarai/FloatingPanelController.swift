@@ -45,7 +45,8 @@ final class FloatingPanelController: NSWindowController, WKScriptMessageHandler 
         WindowPlacementCoordinator.restoreOrSnap(
             window!,
             autosaveName: "FloatingChatPanel",
-            placementMode: loadPlacementMode()
+            placementMode: loadPlacementMode(),
+            followSafariWindow: loadFollowSafariWindow()
         )
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
