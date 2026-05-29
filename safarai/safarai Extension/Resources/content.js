@@ -556,6 +556,7 @@ async function enrichContextWithPlatformTranscript(context) {
       ...(context.metadata ?? {}),
       platformTranscriptStatus:
         context.metadata?.platformTranscriptStatus || "unavailable",
+      platformTranscriptDebug: lastYouTubeTranscriptDebug,
     };
     return context;
   }
@@ -668,60 +669,26 @@ async function fetchYouTubeTranscript() {
   return [];
 }
 
-// InnerTube get_transcript: the current reliable path. Runs same-origin from the
-// content script, so it uses the page session and needs no POT token or proxy.
-const YOUTUBE_INNERTUBE_FALLBACK_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-const YOUTUBE_INNERTUBE_FALLBACK_VERSION = "2.20240826.01.00";
+let lastYouTubeTranscriptDebug = "";
 
+// Delegate the InnerTube calls to the background script: it holds the youtube.com host
+// permission, so its fetch is privileged and not blocked by page CORS.
 async function fetchYouTubeTranscriptViaInnerTube() {
   const videoId = getYouTubeVideoId();
   if (!videoId) {
+    lastYouTubeTranscriptDebug = "no_video_id";
     return [];
   }
   try {
-    const { key, clientVersion } = readYouTubeInnerTubeConfig();
-    const context = {
-      client: {
-        clientName: "WEB",
-        clientVersion,
-        hl: navigator.language?.slice(0, 2) || "en",
-        gl: "US",
-      },
-    };
-
-    // getTranscriptEndpoint params live in ytInitialData; fall back to a player POST.
-    let params = findKeyDeep(scrapeYouTubeGlobal("ytInitialData"), "getTranscriptEndpoint")?.params;
-    if (!params) {
-      const player = await youtubeInnerTubePost("player", key, { context, videoId });
-      params = findKeyDeep(player, "getTranscriptEndpoint")?.params;
-    }
-    if (!params) {
-      return [];
-    }
-
-    const transcriptResponse = await youtubeInnerTubePost("get_transcript", key, { context, params });
-    const segments = findKeyDeep(transcriptResponse, "initialSegments");
-    if (!Array.isArray(segments)) {
-      return [];
-    }
-    return segments
-      .map((entry) => {
-        const seg = entry?.transcriptSegmentRenderer;
-        if (!seg) {
-          return null;
-        }
-        const text = Array.isArray(seg.snippet?.runs)
-          ? seg.snippet.runs.map((run) => run?.text || "").join("")
-          : seg.snippet?.simpleText || "";
-        return makeTranscriptSegmentFromMilliseconds(
-          seg.startMs,
-          seg.endMs == null ? null : Number(seg.endMs),
-          text,
-          "youtube_caption"
-        );
-      })
-      .filter(Boolean);
-  } catch {
+    const response = await browser.runtime.sendMessage({
+      type: "content:youtube-transcript",
+      payload: { videoId },
+    });
+    lastYouTubeTranscriptDebug = String(response?.payload?.debug || response?.error?.message || "");
+    const segments = response?.payload?.segments;
+    return Array.isArray(segments) ? segments : [];
+  } catch (error) {
+    lastYouTubeTranscriptDebug = `send_failed:${error?.message || error}`;
     return [];
   }
 }
@@ -738,32 +705,6 @@ function getYouTubeVideoId() {
   } catch {
     return "";
   }
-}
-
-function readYouTubeInnerTubeConfig() {
-  const html = document.documentElement?.innerHTML || "";
-  const key = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1] || YOUTUBE_INNERTUBE_FALLBACK_KEY;
-  const clientVersion =
-    html.match(/"INNERTUBE_CONTEXT_CLIENT_VERSION":"([^"]+)"/)?.[1] ||
-    html.match(/"clientVersion":"([\d.]+)"/)?.[1] ||
-    YOUTUBE_INNERTUBE_FALLBACK_VERSION;
-  return { key, clientVersion };
-}
-
-async function youtubeInnerTubePost(endpoint, key, body) {
-  const response = await fetch(
-    `https://www.youtube.com/youtubei/v1/${endpoint}?key=${encodeURIComponent(key)}&prettyPrint=false`,
-    {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }
-  );
-  if (!response.ok) {
-    throw new Error(`innertube ${endpoint} ${response.status}`);
-  }
-  return response.json();
 }
 
 function scrapeYouTubeGlobal(marker) {
