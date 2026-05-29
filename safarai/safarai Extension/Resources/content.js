@@ -916,7 +916,24 @@ function parseYouTubeTranscriptXML(text) {
 }
 
 async function fetchBilibiliTranscript() {
-  const subtitleURLs = findBilibiliSubtitleURLs();
+  const subtitleURLs = [];
+  try {
+    const listURL = await getBilibiliSubtitleListURL();
+    if (listURL) {
+      const data = JSON.parse(await fetchTranscriptText(listURL));
+      for (const sub of data?.data?.subtitle?.subtitles || []) {
+        if (sub?.subtitle_url) {
+          subtitleURLs.push(new URL(sub.subtitle_url, window.location.href).toString());
+        }
+      }
+    }
+  } catch {
+    // Fall back to DOM-scraped subtitle URLs below.
+  }
+  for (const url of findBilibiliSubtitleURLs()) {
+    subtitleURLs.push(url);
+  }
+
   for (const url of subtitleURLs) {
     try {
       const payload = JSON.parse(await fetchTranscriptText(url));
@@ -939,6 +956,95 @@ async function fetchBilibiliTranscript() {
     }
   }
   return [];
+}
+
+// The Bilibili subtitle list is only available behind the WBI-signed player endpoint.
+let bilibiliWbiMixinKeyCache = "";
+
+async function getBilibiliSubtitleListURL() {
+  const state = scrapeYouTubeGlobal("__INITIAL_STATE__"); // generic page-JSON scraper, reused
+  const videoData = state?.videoData || findKeyDeep(state, "videoData") || {};
+  const aid = videoData.aid || state?.aid;
+  const bvid = videoData.bvid || state?.bvid;
+  const cid = videoData.cid || findKeyDeep(state, "cid");
+  if (!cid || (!aid && !bvid)) {
+    return "";
+  }
+  const mixinKey = await getBilibiliWbiMixinKey();
+  if (!mixinKey) {
+    return "";
+  }
+  const params = { cid: String(cid) };
+  if (aid) params.aid = String(aid);
+  if (bvid) params.bvid = String(bvid);
+  return `https://api.bilibili.com/x/player/wbi/v2?${wbiSignedQuery(params, mixinKey)}`;
+}
+
+async function getBilibiliWbiMixinKey() {
+  if (bilibiliWbiMixinKeyCache) {
+    return bilibiliWbiMixinKeyCache;
+  }
+  try {
+    const nav = JSON.parse(await fetchTranscriptText("https://api.bilibili.com/x/web-interface/nav"));
+    const imgURL = String(nav?.data?.wbi_img?.img_url || "");
+    const subURL = String(nav?.data?.wbi_img?.sub_url || "");
+    const raw =
+      imgURL.slice(imgURL.lastIndexOf("/") + 1).split(".")[0] +
+      subURL.slice(subURL.lastIndexOf("/") + 1).split(".")[0];
+    const table = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52];
+    bilibiliWbiMixinKeyCache = table.map((i) => raw[i] || "").join("").slice(0, 32);
+  } catch {
+    bilibiliWbiMixinKeyCache = "";
+  }
+  return bilibiliWbiMixinKeyCache;
+}
+
+function wbiSignedQuery(params, mixinKey) {
+  const signed = { ...params, wts: Math.floor(Date.now() / 1000) };
+  const query = Object.keys(signed)
+    .sort()
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(String(signed[k]).replace(/[!'()*]/g, ""))}`)
+    .join("&");
+  return `${query}&w_rid=${md5(query + mixinKey)}`;
+}
+
+function md5(str) {
+  const S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+  const K = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296));
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 128) bytes.push(c);
+    else if (c < 2048) bytes.push(192 | (c >> 6), 128 | (c & 63));
+    else bytes.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+  }
+  const bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let i = 0; i < 8; i++) bytes.push((bitLen / 2 ** (8 * i)) & 0xff);
+
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+  const rotl = (x, c) => (x << c) | (x >>> (32 - c));
+  for (let off = 0; off < bytes.length; off += 64) {
+    const M = [];
+    for (let i = 0; i < 16; i++) {
+      M[i] = bytes[off + i * 4] | (bytes[off + i * 4 + 1] << 8) | (bytes[off + i * 4 + 2] << 16) | (bytes[off + i * 4 + 3] << 24);
+    }
+    let [A, B, C, D] = [a0, b0, c0, d0];
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16) { F = (B & C) | (~B & D); g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+      else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16; }
+      else { F = C ^ (B | ~D); g = (7 * i) % 16; }
+      F = (F + A + K[i] + M[g]) | 0;
+      A = D; D = C; C = B;
+      B = (B + rotl(F, S[i])) | 0;
+    }
+    a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+  }
+  const hex = (n) => Array.from({ length: 4 }, (_, i) => ((n >> (i * 8)) & 0xff).toString(16).padStart(2, "0")).join("");
+  return hex(a0) + hex(b0) + hex(c0) + hex(d0);
 }
 
 async function fetchTranscriptText(url) {

@@ -40,6 +40,7 @@
 
     "host_permissions": [
         "*://*.youtube.com/*",
+        "*://api.bilibili.com/*",
         "*://*.hdslb.com/*",
         "*://*.bilivideo.com/*"
     ],

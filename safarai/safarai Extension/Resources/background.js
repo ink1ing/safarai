@@ -1341,6 +1341,8 @@ function isAllowedTranscriptURL(value) {
       hostname === "www.youtube.com" ||
       hostname === "youtube.com" ||
       hostname.endsWith(".youtube.com") ||
+      hostname === "api.bilibili.com" ||
+      hostname.endsWith(".bilibili.com") ||
       hostname === "i0.hdslb.com" ||
       hostname === "i1.hdslb.com" ||
       hostname === "i2.hdslb.com" ||
