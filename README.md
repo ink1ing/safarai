@@ -395,6 +395,16 @@ Examples visible in code:
 - The host app and extension share state through an App Group container rather than a local HTTP server.
 - Update checks are implemented against GitHub Releases, not Sparkle.
 
+## Testing
+
+The JavaScript logic shared by the extension (page-context extraction, write-target resolution, message protocol, and session/log pruning) is covered by Node's built-in test runner. From the repository root:
+
+```bash
+npm test
+```
+
+This runs `node --test` against the suites under `tests/`. No dependencies or bundler are required.
+
 ## Security and Privacy Notes
 
 Based on the current implementation:

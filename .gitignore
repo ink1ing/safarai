@@ -1,12 +1,9 @@
 .DS_Store
 .last-build.log
 .derived-data/
+.build/
 *.xcuserstate
 **/xcuserdata/
 node_modules/
 .opencode
-
-.build/
-opencode.json
-video-summary-requirements.md
 opencode.json

@@ -143,5 +143,5 @@ Safari AI Sidebar for macOS
 
 ## 本轮文档索引
 
-- [plans.md](/Users/silas/Desktop/plans.md)：执行阶段、时间线、测试与里程碑
-- [details.md](/Users/silas/Desktop/details.md)：架构、协议、工具与细节设计
+- [plans.md](./plans.md)：执行阶段、时间线、测试与里程碑
+- [details.md](./details.md)：架构、协议、工具与细节设计
