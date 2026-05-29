@@ -216,43 +216,20 @@ enum WindowPlacementCoordinator {
     }
 
     private static func appKitFrame(fromCGWindowFrame cgFrame: CGRect) -> CGRect {
-        let screen = screenContainingCGWindowFrame(cgFrame) ?? NSScreen.main
-        guard let screen else {
-            let globalMaxY = NSScreen.screens.map(\.frame.maxY).max() ?? 0
-            return CGRect(
-                x: cgFrame.minX,
-                y: globalMaxY - cgFrame.maxY,
-                width: cgFrame.width,
-                height: cgFrame.height
-            )
-        }
-
-        let appKitY = screen.frame.maxY - (cgFrame.minY - screenCGMinY(screen)) - cgFrame.height
-        return CGRect(x: cgFrame.minX, y: appKitY, width: cgFrame.width, height: cgFrame.height)
-    }
-
-    private static func screenContainingCGWindowFrame(_ cgFrame: CGRect) -> NSScreen? {
-        NSScreen.screens.max {
-            cgWindowIntersectionArea(cgFrame, screen: $0) < cgWindowIntersectionArea(cgFrame, screen: $1)
-        }
-    }
-
-    private static func cgWindowIntersectionArea(_ cgFrame: CGRect, screen: NSScreen) -> CGFloat {
-        cgFrame.intersection(cgFrameForScreen(screen)).area
-    }
-
-    private static func cgFrameForScreen(_ screen: NSScreen) -> CGRect {
-        let globalMaxY = NSScreen.screens.map(\.frame.maxY).max() ?? screen.frame.maxY
-        return CGRect(
-            x: screen.frame.minX,
-            y: globalMaxY - screen.frame.maxY,
-            width: screen.frame.width,
-            height: screen.frame.height
+        // CG global coords are flipped about the PRIMARY display's top edge, so the only
+        // correct conversion reference is the primary display height. Using the max maxY
+        // across screens is wrong when a display sits above/below the primary and made the
+        // panel snap to the opposite screen on multi-monitor setups.
+        CGRect(
+            x: cgFrame.minX,
+            y: primaryDisplayHeight() - cgFrame.maxY,
+            width: cgFrame.width,
+            height: cgFrame.height
         )
     }
 
-    private static func screenCGMinY(_ screen: NSScreen) -> CGFloat {
-        cgFrameForScreen(screen).minY
+    private static func primaryDisplayHeight() -> CGFloat {
+        (NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.main)?.frame.height ?? 0
     }
 }
 
