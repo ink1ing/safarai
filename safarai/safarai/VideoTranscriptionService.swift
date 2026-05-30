@@ -14,21 +14,57 @@ enum VideoTranscriptionService {
         referer: String?,
         filename: String = "audio.mp4"
     ) async -> [PanelVideoTranscriptSegment]? {
-        let settings = OpenAICompatibleSettingsStore.load()
-        guard
-            settings.isConfigured,
-            let uploadURL = endpointURL(settings.endpoint, path: "audio/transcriptions"),
-            let mediaURL = URL(string: audioURL)
-        else {
-            return nil
-        }
+        guard let mediaURL = URL(string: audioURL) else { return nil }
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 90
         config.timeoutIntervalForResource = 300
         let session = URLSession(configuration: config)
 
-        guard let audioData = await downloadAudio(mediaURL, referer: referer, session: session) else {
+        guard
+            let audioData = await downloadAudio(mediaURL, referer: referer, session: session),
+            let fileURL = writeTempFile(audioData, filename: filename)
+        else {
+            return nil
+        }
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        switch sttEngine() {
+        case "apple_speech":
+            return await AppleSpeechTranscriber.transcribe(fileURL: fileURL)
+        case "local_whisper":
+            return await LocalWhisperTranscriber.transcribe(fileURL: fileURL)
+        default:
+            return await remoteTranscribe(audioData: audioData, filename: filename, session: session)
+        }
+    }
+
+    /// Selected STT engine from ui-settings.json: remote | apple_speech | local_whisper.
+    private static func sttEngine() -> String {
+        let url = SharedContainer.baseURL().appendingPathComponent("ui-settings.json")
+        guard
+            let data = try? Data(contentsOf: url),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let engine = json["stt_engine"] as? String
+        else {
+            return "remote"
+        }
+        return engine
+    }
+
+    private static func writeTempFile(_ data: Data, filename: String) -> URL? {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("safarai-\(UUID().uuidString)-\(filename)")
+        guard (try? data.write(to: url)) != nil else { return nil }
+        return url
+    }
+
+    private static func remoteTranscribe(audioData: Data, filename: String, session: URLSession) async -> [PanelVideoTranscriptSegment]? {
+        let settings = OpenAICompatibleSettingsStore.load()
+        guard
+            settings.isConfigured,
+            let uploadURL = endpointURL(settings.endpoint, path: "audio/transcriptions")
+        else {
             return nil
         }
 

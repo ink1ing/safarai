@@ -37,5 +37,7 @@
 	<string>Main</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Safarai uses on-device speech recognition to transcribe video audio into summaries.</string>
 </dict>
 </plist>
