@@ -187,7 +187,7 @@ enum WindowPlacementCoordinator {
     private static func safariWindowFrame(preferring screen: NSScreen? = nil) -> CGRect? {
         guard
             let infoList = CGWindowListCopyWindowInfo(
-                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+                [.excludeDesktopElements], kCGNullWindowID
             ) as? [[String: Any]]
         else {
             return nil
