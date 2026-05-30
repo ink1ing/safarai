@@ -53,7 +53,7 @@ enum WindowPlacementCoordinator {
         window: NSWindow,
         mode: PlacementMode
     ) -> NSRect? {
-        if let safariFrame = safariWindowFrame() {
+        if let safariFrame = safariWindowFrame(preferring: window.screen) {
             return targetFrameBesideSafari(window: window, safariFrame: safariFrame, mode: mode)
         }
 
@@ -184,7 +184,7 @@ enum WindowPlacementCoordinator {
     }
 
     /// 尝试通过 CGWindowList 获取 Safari 主窗口 frame，并转换到 AppKit 全局坐标系。
-    private static func safariWindowFrame() -> CGRect? {
+    private static func safariWindowFrame(preferring screen: NSScreen? = nil) -> CGRect? {
         guard
             let infoList = CGWindowListCopyWindowInfo(
                 [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
@@ -193,6 +193,7 @@ enum WindowPlacementCoordinator {
             return nil
         }
 
+        var candidates: [CGRect] = []
         for item in infoList {
             guard
                 let owner  = item[kCGWindowOwnerName as String] as? String,
@@ -207,12 +208,21 @@ enum WindowPlacementCoordinator {
                 let rawLayer = item[kCGWindowLayer as String] as? Int,
                 rawLayer == 0
             else { continue }
-
-            let cgFrame = CGRect(x: x, y: y, width: width, height: height)
-            return appKitFrame(fromCGWindowFrame: cgFrame)
+            candidates.append(appKitFrame(fromCGWindowFrame: CGRect(x: x, y: y, width: width, height: height)))
         }
 
-        return nil
+        guard !candidates.isEmpty else { return nil }
+
+        // Pin to the Safari window on the panel's own screen so the panel doesn't jump to a
+        // Safari window on another display; only follow across screens when Safari actually
+        // moves there. Fall back to the largest (main) window for stable initial placement.
+        if let screen {
+            let best = candidates
+                .filter { $0.intersection(screen.frame).area > 0 }
+                .max { $0.intersection(screen.frame).area < $1.intersection(screen.frame).area }
+            if let best { return best }
+        }
+        return candidates.max { $0.area < $1.area }
     }
 
     private static func appKitFrame(fromCGWindowFrame cgFrame: CGRect) -> CGRect {
@@ -287,7 +297,7 @@ final class SafariWindowFollower {
             return
         }
 
-        guard let safariFrame = WindowPlacementCoordinator.safariWindowFrameForFollowing() else {
+        guard let safariFrame = WindowPlacementCoordinator.safariWindowFrameForFollowing(preferring: window.screen) else {
             return
         }
 
@@ -317,7 +327,7 @@ final class SafariWindowFollower {
 
     private func frameDidChange(_ previous: CGRect?, _ next: CGRect) -> Bool {
         guard let previous else { return true }
-        let threshold: CGFloat = 1.0
+        let threshold: CGFloat = 4.0
         return abs(previous.origin.x - next.origin.x) > threshold ||
             abs(previous.origin.y - next.origin.y) > threshold ||
             abs(previous.size.width - next.size.width) > threshold ||
@@ -332,7 +342,7 @@ private extension CGRect {
 }
 
 private extension WindowPlacementCoordinator {
-    static func safariWindowFrameForFollowing() -> CGRect? {
-        safariWindowFrame()
+    static func safariWindowFrameForFollowing(preferring screen: NSScreen?) -> CGRect? {
+        safariWindowFrame(preferring: screen)
     }
 }
