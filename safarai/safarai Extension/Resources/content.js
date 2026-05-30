@@ -558,6 +558,15 @@ async function enrichContextWithPlatformTranscript(context) {
         context.metadata?.platformTranscriptStatus || "unavailable",
       platformTranscriptDebug: lastYouTubeTranscriptDebug,
     };
+    // No caption track: expose an audio stream URL so the host app can run ASR.
+    if (String(context?.site || "") === "bilibili") {
+      const audioURL = await getBilibiliAudioStreamURL();
+      if (audioURL) {
+        context.metadata.audioStreamUrl = audioURL;
+        context.metadata.audioStreamReferer = "https://www.bilibili.com";
+        context.metadata.audioStreamFilename = "audio.mp4";
+      }
+    }
     return context;
   }
 
@@ -951,6 +960,45 @@ async function getBilibiliSubtitleListURL() {
   if (aid) params.aid = String(aid);
   if (bvid) params.bvid = String(bvid);
   return `https://api.bilibili.com/x/player/wbi/v2?${wbiSignedQuery(params, mixinKey)}`;
+}
+
+async function getBilibiliAudioStreamURL() {
+  try {
+    // Prefer the page-embedded play info (already-signed URLs); fall back to WBI playurl.
+    const embedded = scrapeYouTubeGlobal("__playinfo__")?.data?.dash?.audio || [];
+    if (embedded.length) {
+      const pick = embedded.slice().sort((a, b) => (a.bandwidth || 0) - (b.bandwidth || 0))[0];
+      const embeddedURL = pick?.baseUrl || pick?.base_url || "";
+      if (embeddedURL) {
+        return embeddedURL;
+      }
+    }
+    const state = scrapeYouTubeGlobal("__INITIAL_STATE__");
+    const videoData = state?.videoData || findKeyDeep(state, "videoData") || {};
+    const aid = videoData.aid || state?.aid;
+    const bvid = videoData.bvid || state?.bvid;
+    const cid = videoData.cid || findKeyDeep(state, "cid");
+    if (!cid || (!aid && !bvid)) {
+      return "";
+    }
+    const mixinKey = await getBilibiliWbiMixinKey();
+    if (!mixinKey) {
+      return "";
+    }
+    const params = { cid: String(cid), fnval: "16", fourk: "1", qn: "0" };
+    if (aid) params.avid = String(aid);
+    if (bvid) params.bvid = String(bvid);
+    const url = `https://api.bilibili.com/x/player/playurl?${wbiSignedQuery(params, mixinKey)}`;
+    const data = JSON.parse(await fetchTranscriptText(url));
+    const audios = data?.data?.dash?.audio || [];
+    if (!audios.length) {
+      return "";
+    }
+    const best = audios.slice().sort((a, b) => (a.bandwidth || 0) - (b.bandwidth || 0))[0];
+    return best?.baseUrl || best?.base_url || "";
+  } catch {
+    return "";
+  }
 }
 
 async function getBilibiliWbiMixinKey() {

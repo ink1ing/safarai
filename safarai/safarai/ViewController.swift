@@ -743,6 +743,24 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             return baseline
         }
 
+        // Prefer audio ASR when the page exposed an audio stream (no usable captions).
+        if let audioURL = context?.metadata["audioStreamUrl"], !audioURL.isEmpty {
+            await MainActor.run {
+                pushPanelState(status: AppText.localized(en: "Transcribing audio…", zh: "正在转写视频音频…"))
+            }
+            if let segments = await VideoTranscriptionService.transcribe(
+                audioURL: audioURL,
+                referer: context?.metadata["audioStreamReferer"],
+                filename: context?.metadata["audioStreamFilename"] ?? "audio.mp4"
+            ), !segments.isEmpty, var snapshot = baseline {
+                snapshot.context?.videoTranscript = segments
+                snapshot.context?.metadata["videoTranscriptSource"] = "asr_whisper"
+                snapshot.context?.metadata["videoTranscriptCount"] = String(segments.count)
+                snapshot.context?.metadata["hasTranscript"] = "true"
+                return snapshot
+            }
+        }
+
         await MainActor.run {
             pushPanelState(status: AppText.localized(en: "Sampling video frames…", zh: "正在慢速采样视频画面…"))
         }
