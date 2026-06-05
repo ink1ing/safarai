@@ -347,17 +347,11 @@ test("Yahoo Mail 会识别邮件正文和编辑器", () => {
   assert.match(result.articleText, /^Yahoo mail content/);
 });
 
-test("YouTube 视频页会提取标题、频道、描述和可见字幕", () => {
+test("YouTube 视频页会提取标题、频道、描述和页面线索", () => {
   const title = createNode({ tagName: "H1", textContent: "How Safari Extensions Work" });
   const channel = createNode({ tagName: "DIV", textContent: "WebKit Channel" });
   const description = createNode({
     textContent: "This video explains Safari extension architecture and message passing in detail.",
-  });
-  const transcriptA = createNode({ textContent: "00:00 Welcome to the Safari extension walkthrough." });
-  const transcriptB = createNode({ textContent: "00:12 The content script reads the current page context." });
-  const transcriptRoot = createNode({
-    tagName: "YTD-TRANSCRIPT-RENDERER",
-    children: [transcriptA, transcriptB],
   });
 
   const doc = createDocument({
@@ -366,10 +360,6 @@ test("YouTube 视频页会提取标题、频道、描述和可见字幕", () => 
       "h1.ytd-watch-metadata": title,
       "#owner #channel-name": channel,
       "#description-inline-expander": description,
-      "ytd-transcript-renderer": transcriptRoot,
-    },
-    selectorAll: {
-      "ytd-transcript-segment-renderer": [transcriptA, transcriptB],
     },
   });
 
@@ -384,13 +374,13 @@ test("YouTube 视频页会提取标题、频道、描述和可见字幕", () => 
   assert.equal(result.metadata.pageKind, "youtube_video");
   assert.equal(result.metadata.videoTitle, "How Safari Extensions Work");
   assert.equal(result.metadata.videoAuthor, "WebKit Channel");
-  assert.equal(result.metadata.hasTranscript, "true");
-  assert.equal(result.metadata.videoTranscriptCount, "2");
-  assert.equal(result.videoTranscript[1].timestamp, "00:12");
-  assert.equal(result.videoTranscript[1].text, "The content script reads the current page context.");
+  assert.equal(result.metadata.videoContentBasis, "page_metadata");
+  assert.equal(result.videoTranscript, undefined);
+  assert.equal(result.metadata.videoTranscriptCount, undefined);
   assert.match(result.articleText, /video_title: How Safari Extensions Work/);
-  assert.match(result.articleText, /video_transcript_or_visible_subtitles/);
-  assert.match(result.structureSummary, /has_transcript=true/);
+  assert.match(result.articleText, /video_description:\nThis video explains Safari extension architecture/);
+  assert.doesNotMatch(result.articleText, /video_transcript_or_visible_subtitles/);
+  assert.doesNotMatch(result.structureSummary, /has_transcript=/);
 });
 
 test("YouTube 视频页会提取章节和评论注意力信号", () => {
@@ -434,7 +424,7 @@ test("YouTube 视频页会提取章节和评论注意力信号", () => {
   assert.match(result.articleText, /comment_attention_signals/);
 });
 
-test("YouTube 视频页无 transcript DOM 时会读取 textTracks cues", () => {
+test("YouTube 视频页忽略 textTracks cues，仅保留视频 metadata", () => {
   const video = createNode({
     tagName: "VIDEO",
     rect: { top: 10, left: 10, width: 1280, height: 720, right: 1290, bottom: 730 },
@@ -468,22 +458,16 @@ test("YouTube 视频页无 transcript DOM 时会读取 textTracks cues", () => {
   assert.equal(result.metadata.hasPrimaryVideo, "true");
   assert.equal(result.metadata.videoDurationSeconds, "180");
   assert.equal(result.metadata.videoCurrentTimeSeconds, "14");
-  assert.equal(result.metadata.videoTranscriptSource, "text_track");
-  assert.equal(result.videoTranscript[1].timestamp, "00:12");
-  assert.equal(result.videoTranscript[1].endSeconds, 24);
+  assert.equal(result.metadata.videoContentBasis, "page_metadata");
+  assert.equal(result.metadata.videoTranscriptSource, undefined);
+  assert.equal(result.videoTranscript, undefined);
 });
 
-test("Bilibili 视频页会提取标题、UP 主、简介和字幕候选", () => {
+test("Bilibili 视频页会提取标题、UP 主、简介和页面线索", () => {
   const title = createNode({ tagName: "H1", textContent: "Safari AI 轻量扩展开发记录" });
   const up = createNode({ tagName: "A", textContent: "前端实验室" });
   const description = createNode({
-    textContent: "本期记录如何把页面内容、视频字幕和聊天面板连接起来。",
-  });
-  const subtitleA = createNode({ textContent: "首先我们读取当前视频页的基础信息。" });
-  const subtitleB = createNode({ textContent: "然后把字幕候选合并进上下文。" });
-  const subtitlePanel = createNode({
-    tagName: "DIV",
-    children: [subtitleA, subtitleB],
+    textContent: "本期记录如何把页面内容和聊天面板连接起来。",
   });
 
   const doc = createDocument({
@@ -492,10 +476,6 @@ test("Bilibili 视频页会提取标题、UP 主、简介和字幕候选", () =>
       ".video-title": title,
       ".up-name": up,
       ".video-desc": description,
-      ".bpx-player-subtitle-panel": subtitlePanel,
-    },
-    selectorAll: {
-      ".bpx-player-subtitle-panel-text": [subtitleA, subtitleB],
     },
   });
 
@@ -510,11 +490,11 @@ test("Bilibili 视频页会提取标题、UP 主、简介和字幕候选", () =>
   assert.equal(result.metadata.pageKind, "bilibili_video");
   assert.equal(result.metadata.videoTitle, "Safari AI 轻量扩展开发记录");
   assert.equal(result.metadata.videoAuthor, "前端实验室");
-  assert.equal(result.metadata.hasTranscript, "true");
-  assert.equal(result.metadata.videoTranscriptSource, "visible_subtitle");
-  assert.equal(result.videoTranscript.length, 2);
+  assert.equal(result.metadata.videoContentBasis, "page_metadata");
+  assert.equal(result.metadata.videoTranscriptSource, undefined);
+  assert.equal(result.videoTranscript, undefined);
   assert.match(result.articleText, /video_description/);
-  assert.match(result.articleText, /然后把字幕候选合并进上下文/);
+  assert.match(result.articleText, /本期记录如何把页面内容和聊天面板连接起来/);
 });
 
 test("普通页面含主 video 时会标记可显示视频总结入口", () => {
@@ -542,8 +522,9 @@ test("普通页面含主 video 时会标记可显示视频总结入口", () => {
 
   const result = extractPageContext(win, doc);
   assert.equal(result.metadata.hasPrimaryVideo, "true");
-  assert.equal(result.metadata.videoTranscriptCount, "0");
-  assert.deepEqual(result.videoTranscript, []);
+  assert.equal(result.metadata.videoContentBasis, "page_metadata");
+  assert.equal(result.metadata.videoTranscriptCount, undefined);
+  assert.equal(result.videoTranscript, undefined);
 });
 
 test("DOM context v2 会跳过隐藏导航并产出结构与交互摘要", () => {

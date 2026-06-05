@@ -380,7 +380,6 @@ final class ZedResponseService {
             if let videoRAGSummary = context.videoRAGSummary, !videoRAGSummary.isEmpty {
                 sections.append("video_rag_signals:\n\(videoRAGSummary)")
             }
-            appendVideoTranscript(context, to: &sections)
         }
 
         if !history.isEmpty {
@@ -395,40 +394,25 @@ final class ZedResponseService {
         return sections.joined(separator: "\n\n")
     }
 
-    private func appendVideoTranscript(_ context: PanelContextSnapshot, to sections: inout [String]) {
-        guard let transcript = context.videoTranscript, !transcript.isEmpty else { return }
-        let lines = transcript.prefix(240).map { segment in
-            let end = segment.endSeconds.map { "-\(formatTimestamp($0))" } ?? ""
-            return "[\(segment.timestamp)\(end)] \(segment.text)"
-        }
-        sections.append("video_transcript:\n\(lines.joined(separator: "\n"))")
-    }
+
 
     private func appendTaskIntent(_ taskIntent: String, context: PanelContextSnapshot?, to sections: inout [String]) {
         guard taskIntent == "summarize_video" else { return }
-        let transcriptCount = context?.videoTranscript?.count ?? 0
         sections.append("""
 task_intent: summarize_video
 output_requirements:
-	- 用 Markdown 输出三个部分：## 整体概览、## 时间线要点、## 适合快速记住的结论。
-	- 时间线要点必须引用可用时间戳，格式如 00:00-02:15：要点。
-	- 融合页面结构、视频标题/描述、章节/重要时刻、评论高信号和字幕；评论区只作为“集体注意力信号”，不要把评论当成视频事实。
-	- 不要编造字幕或页面中没有的信息。
-- 如果 video_transcript 为空，必须先写“未检测到可用时间戳字幕”，再仅基于标题、简介、可见页面信息做简短总结。
-video_transcript_count: \(transcriptCount)
+- 用 Markdown 输出三个部分：## 整体概览、## 页面线索、## 适合快速记住的结论。
+- 只能基于当前页面可见或可提取的信息推测视频内容，例如标题、简介、章节/重要时刻、评论高信号、页面结构和元数据。
+- 如果页面提供章节或时间戳线索，可以在“页面线索”中引用这些时间戳；不要声称这些是从视频内部识别出的内容。
+- 评论区只作为“集体注意力信号”，不要把评论当成视频事实。
+- 不要声称已经读取字幕、音频或视频画面；不要编造页面中没有的信息。
+- 开头必须说明：以下总结基于页面内容线索，并非直接读取视频内部内容。
+video_content_basis: page_metadata
 """)
     }
 
-    private func formatTimestamp(_ value: Double) -> String {
-        let seconds = max(0, Int(value.rounded()))
-        let hours = seconds / 3600
-        let minutes = (seconds % 3600) / 60
-        let remaining = seconds % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
-        }
-        return String(format: "%02d:%02d", minutes, remaining)
-    }
+
+
 
     // MARK: - Provider Request Builder
 

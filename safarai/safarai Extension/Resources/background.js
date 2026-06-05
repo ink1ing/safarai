@@ -143,16 +143,10 @@ browser.runtime.onMessage.addListener((message, sender) => {
       return askPage(sender.tab?.id, message.payload?.prompt, message.payload?.selection);
     case "sidebar:get-logs":
       return getLogs();
-    case "native:sample-video-frames":
-      return sampleVideoFramesForActiveTab();
     case "content:selection-updated":
       return syncSelectionFromContent(sender.tab?.id, message.payload);
     case "content:page-updated":
       return syncPanelStateFromContent(sender.tab?.id, message.payload?.context);
-    case "content:fetch-transcript-url":
-      return fetchTranscriptURL(message.payload?.url);
-    case "content:sample-video-frames":
-      return sampleVideoFramesForTab(sender.tab?.id);
     default:
       return Promise.resolve(
         createErrorResponse("unsupported_message", `不支持的消息类型: ${message.type}`)
@@ -1015,8 +1009,6 @@ function directPageContextProbe() {
     interactiveSummary: "",
     interactiveTargets: [],
     focusedInput: null,
-    videoTranscript: [],
-    videoFrameSamples: [],
     metadata: {
       domain: hostname,
       pageKind,
@@ -1214,145 +1206,6 @@ async function sendNativeControlRequest(type, payload) {
   }
 }
 
-async function fetchTranscriptURL(url) {
-  const normalizedURL = String(url || "").trim();
-  if (!isAllowedTranscriptURL(normalizedURL)) {
-    return createErrorResponse("invalid_transcript_url", "字幕地址不受支持");
-  }
-
-  try {
-    const response = await fetch(normalizedURL, { credentials: "include" });
-    if (!response.ok) {
-      return createErrorResponse("transcript_fetch_failed", `字幕请求失败：${response.status}`);
-    }
-    const text = await response.text();
-    return createSuccessResponse({ text });
-  } catch (error) {
-    return createErrorResponse(
-      "transcript_fetch_failed",
-      `字幕请求失败：${error?.message ?? String(error)}`
-    );
-  }
-}
-
-async function sampleVideoFramesForActiveTab() {
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-  return sampleVideoFramesForTab(tab?.id);
-}
-
-async function sampleVideoFramesForTab(tabId) {
-  const tab = tabId ? await browser.tabs.get(tabId).catch(() => null) : null;
-  if (!tab?.id) {
-    return createSuccessResponse({ samples: [], reason: "tab_not_found" });
-  }
-
-  const contextResult = await requestPageContext(tab.id);
-  const context = contextResult.payload?.context ?? {};
-  const duration = Number(context.metadata?.videoDurationSeconds || 0);
-  const sampleTimes = buildVideoSampleTimes(duration);
-  const samples = [];
-
-  for (const timeSeconds of sampleTimes) {
-    const prepared = await browser.tabs.sendMessage(tab.id, {
-      type: "content:prepare-video-frame-sample",
-      payload: { timeSeconds },
-    }).catch((error) => ({
-      ok: false,
-      error: { message: error?.message || String(error) },
-    }));
-    if (!prepared?.ok || prepared.payload?.prepared === false) {
-      continue;
-    }
-
-    const image = await captureVisibleTabFrame(tab.windowId);
-    if (!image) {
-      continue;
-    }
-    samples.push({
-      timestamp: prepared.payload?.timestamp || formatTimestampForFrame(timeSeconds),
-      timeSeconds: prepared.payload?.timeSeconds ?? Math.round(timeSeconds),
-      image,
-    });
-  }
-
-  const enrichedContext = {
-    ...context,
-    videoFrameSamples: samples,
-    metadata: {
-      ...(context.metadata ?? {}),
-      videoFrameSampleCount: String(samples.length),
-      videoFrameSampleSource: samples.length ? "browser_visible_tab_capture" : "",
-      pageContextTransport: "video_frame_sampling",
-      pageContextUpdatedAt: new Date().toISOString(),
-    },
-  };
-  TAB_STATE.set(tab.id, mergeStableSelection(TAB_STATE.get(tab.id), enrichedContext, "video_frame_sampling"));
-  await syncPanelState(tab.id, TAB_STATE.get(tab.id));
-  return createSuccessResponse({ samples: samples.length, context: enrichedContext });
-}
-
-function buildVideoSampleTimes(duration) {
-  if (!Number.isFinite(duration) || duration <= 0) {
-    return [0, 8, 18, 32, 52, 75].slice(0, 6);
-  }
-
-  const count = Math.min(8, Math.max(4, Math.round(duration / 90) + 3));
-  const start = Math.min(3, duration * 0.05);
-  const end = Math.max(start, duration * 0.92);
-  if (count === 1) {
-    return [start];
-  }
-  return Array.from({ length: count }, (_, index) => {
-    const ratio = index / (count - 1);
-    return start + (end - start) * ratio;
-  });
-}
-
-async function captureVisibleTabFrame(windowId) {
-  if (typeof browser.tabs?.captureVisibleTab !== "function") {
-    return "";
-  }
-  try {
-    return await browser.tabs.captureVisibleTab(windowId, {
-      format: "jpeg",
-      quality: 58,
-    });
-  } catch {
-    return "";
-  }
-}
-
-function formatTimestampForFrame(totalSeconds) {
-  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainingSeconds = seconds % 60;
-  const two = (value) => String(value).padStart(2, "0");
-  return hours > 0
-    ? `${hours}:${two(minutes)}:${two(remainingSeconds)}`
-    : `${two(minutes)}:${two(remainingSeconds)}`;
-}
-
-function isAllowedTranscriptURL(value) {
-  try {
-    const url = new URL(value);
-    const hostname = url.hostname.toLowerCase();
-    return (
-      hostname === "www.youtube.com" ||
-      hostname === "youtube.com" ||
-      hostname.endsWith(".youtube.com") ||
-      hostname === "api.bilibili.com" ||
-      hostname.endsWith(".bilibili.com") ||
-      hostname === "i0.hdslb.com" ||
-      hostname === "i1.hdslb.com" ||
-      hostname === "i2.hdslb.com" ||
-      hostname.endsWith(".hdslb.com") ||
-      hostname.endsWith(".bilivideo.com")
-    );
-  } catch {
-    return false;
-  }
-}
 
 async function getSession(tabIdFromSender) {
   const tabId = await resolveTabId(tabIdFromSender);

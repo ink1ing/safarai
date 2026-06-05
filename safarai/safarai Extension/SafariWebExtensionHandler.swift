@@ -56,7 +56,7 @@ class SafariWebExtensionHandler: SFSafariExtensionHandler {
     }
 
     override func messageReceived(withName messageName: String, from page: SFSafariPage, userInfo: [String : Any]?) {
-        guard messageName == "refresh-active-page-context" || messageName == "sample-active-video-frames" else {
+        guard messageName == "refresh-active-page-context" else {
             return
         }
 

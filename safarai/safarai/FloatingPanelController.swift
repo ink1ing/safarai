@@ -79,15 +79,6 @@ final class FloatingPanelController: NSWindowController, WKScriptMessageHandler 
                 "selection": context?.selection as Any,
                 "articleText": context?.articleText as Any,
                 "metadata": context?.metadata as Any,
-                "videoTranscript": context?.videoTranscript?.map {
-                    [
-                        "startSeconds": $0.startSeconds,
-                        "endSeconds": $0.endSeconds as Any,
-                        "timestamp": $0.timestamp,
-                        "text": $0.text,
-                        "source": $0.source,
-                    ]
-                } as Any,
             ],
             "messages": messages,
             "status": payload?.status as Any,

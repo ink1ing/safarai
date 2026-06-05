@@ -21,7 +21,7 @@ Main use cases implemented in the current codebase:
 - Summarize articles and general pages
 - Extract structured information from a page
 - Generate drafts for the currently focused input field
-- Summarize video pages using transcript data and optional frame sampling
+- Infer and summarize video pages from page-visible signals such as title, description, chapters, comments, and metadata
 - Keep chat history per thread, with pin/rename/delete/import/export support
 - Switch between multiple AI providers
 - Open a detached native chat window from the browser toolbar
@@ -196,7 +196,7 @@ Responsibilities:
 - Maintains background tab state in `background.js`
 - Handles toolbar button and popup interactions
 - Tracks active tab/page URL/title/selection
-- Collects structured page context, article text, interaction targets, and video transcript signals
+- Collects structured page context, article text, interaction targets, and video page metadata
 - Syncs context into shared state for the native panel
 - Bridges extension requests into native Swift code
 
@@ -260,8 +260,7 @@ Current context model includes:
 - Structure summary
 - Interactive target summary
 - Visual summary
-- Video transcript segments
-- Video frame samples
+- Video page metadata
 - Metadata describing page kind, transport mode, sync source, and debug signals
 
 The extension updates context aggressively on:
@@ -289,13 +288,13 @@ Implemented operations include:
 
 ### Video-Aware Assistance
 
-For video pages, the app can enrich prompts using:
+For video pages, the app can infer a summary from page-visible signals:
 
-- Platform transcript extraction
+- Video title, author, description, chapters, and important-moment text when present
+- Comment timestamp signals as collective attention hints
 - Page metadata indicating video state
-- Optional video frame sampling through Safari messaging
 
-This makes the assistant more capable on YouTube/Bilibili-like pages where transcript-only context may be incomplete.
+The app does not fetch platform captions, record audio, transcribe media, or sample video frames. Video answers should state when they are based on page content rather than direct video understanding.
 
 ### Multi-Language and Theme Support
 
@@ -411,7 +410,7 @@ Based on the current implementation:
 
 - Sensitive settings are written into private files inside the shared container
 - OpenAI-compatible credentials are stored locally
-- Browser page context can include selected text, article text, transcript text, and video-derived metadata
+- Browser page context can include selected text, article text, page-visible video signals, and video-related metadata
 - Zed integration reads a local Zed SQLite database to obtain `system_id`
 
 Anyone extending this project should review data retention and credential handling carefully before production distribution.

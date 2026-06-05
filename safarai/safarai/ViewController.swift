@@ -532,9 +532,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
 
         contextRefreshTask = Task { [weak self] in
             guard let self else { return }
-            let refreshedSnapshot = taskIntent == "summarize_video"
-                ? await self.refreshPageContextForVideoSummary()
-                : await self.refreshPageContextForQuestion()
+            let refreshedSnapshot = await self.refreshPageContextForQuestion()
             await MainActor.run {
                 self.contextRefreshTask = nil
                 self.beginQuestion(
@@ -732,77 +730,9 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         return bestSnapshot
     }
 
-    private func refreshPageContextForVideoSummary() async -> PanelStateSnapshot? {
-        let baseline = await refreshPageContextForQuestion()
-        let context = baseline?.context
-        let transcriptCount = context?.videoTranscript?.count ?? 0
-        let hasVideo = context?.metadata["hasPrimaryVideo"] == "true"
-            || context?.metadata["pageKind"] == "youtube_video"
-            || context?.metadata["pageKind"] == "bilibili_video"
-        guard hasVideo, transcriptCount < 3 else {
-            return baseline
-        }
-
-        // Prefer audio ASR when the page exposed an audio stream (no usable captions).
-        if let audioURL = context?.metadata["audioStreamUrl"], !audioURL.isEmpty {
-            await MainActor.run {
-                pushPanelState(status: AppText.localized(en: "Transcribing audio…", zh: "正在转写视频音频…"))
-            }
-            if let segments = await VideoTranscriptionService.transcribe(
-                audioURL: audioURL,
-                referer: context?.metadata["audioStreamReferer"],
-                filename: context?.metadata["audioStreamFilename"] ?? "audio.mp4"
-            ), !segments.isEmpty, var snapshot = baseline {
-                snapshot.context?.videoTranscript = segments
-                snapshot.context?.metadata["videoTranscriptSource"] = "asr_whisper"
-                snapshot.context?.metadata["videoTranscriptCount"] = String(segments.count)
-                snapshot.context?.metadata["hasTranscript"] = "true"
-                return snapshot
-            }
-        }
-
-        await MainActor.run {
-            pushPanelState(status: AppText.localized(en: "Sampling video frames…", zh: "正在慢速采样视频画面…"))
-        }
-        requestActiveSafariVideoFrameSampling()
-
-        let initialUpdatedAt = PanelStateStore.load()?.updatedAt ?? 0
-        let deadline = Date().addingTimeInterval(14)
-        var bestSnapshot = PanelStateStore.load() ?? baseline
-        while Date() < deadline {
-            if Task.isCancelled { return bestSnapshot }
-            guard let snapshot = PanelStateStore.load() else {
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                continue
-            }
-            bestSnapshot = snapshot
-            if snapshot.updatedAt > initialUpdatedAt,
-               let count = Int(snapshot.context?.metadata["videoFrameSampleCount"] ?? "0"),
-               count > 0 {
-                return snapshot
-            }
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
-
-        return bestSnapshot
-    }
-
     private func requestActiveSafariPageContextRefresh() {
         SFSafariApplication.dispatchMessage(
             withName: "refresh-active-page-context",
-            toExtensionWithIdentifier: extensionBundleIdentifier,
-            userInfo: nil
-        ) { [weak self] error in
-            guard let error else { return }
-            DispatchQueue.main.async {
-                self?.pushPanelState(status: error.localizedDescription)
-            }
-        }
-    }
-
-    private func requestActiveSafariVideoFrameSampling() {
-        SFSafariApplication.dispatchMessage(
-            withName: "sample-active-video-frames",
             toExtensionWithIdentifier: extensionBundleIdentifier,
             userInfo: nil
         ) { [weak self] error in
@@ -1065,7 +995,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
                 "selection": jsonValue(snapshot?.context?.selection),
                 "selectionFocusText": jsonValue(selectionIntent?.selection),
                 "selectionDebug": debugSelection,
-                "videoTranscript": snapshot?.context?.videoTranscript?.map(videoTranscriptPayload) ?? [],
                 "metadata": snapshot?.context?.metadata ?? [:],
                 "updatedAt": jsonValue(snapshot?.updatedAt)
             ],
@@ -1077,16 +1006,6 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         ]
 
         evaluate(function: "renderPanelState", payload: payload)
-    }
-
-    private func videoTranscriptPayload(_ segment: PanelVideoTranscriptSegment) -> [String: Any] {
-        [
-            "startSeconds": segment.startSeconds,
-            "endSeconds": jsonValue(segment.endSeconds),
-            "timestamp": segment.timestamp,
-            "text": segment.text,
-            "source": segment.source,
-        ]
     }
 
     @objc private func handleAssistantPanelRefresh() {

@@ -6,20 +6,6 @@ struct PanelConversationMessage: Codable {
     var text: String
 }
 
-struct PanelVideoTranscriptSegment: Codable {
-    var startSeconds: Double
-    var endSeconds: Double?
-    var timestamp: String
-    var text: String
-    var source: String
-}
-
-struct PanelVideoFrameSample: Codable {
-    var timestamp: String
-    var timeSeconds: Double
-    var image: String
-}
-
 struct PanelContextSnapshot: Codable {
     var site: String
     var url: String
@@ -32,8 +18,6 @@ struct PanelContextSnapshot: Codable {
     var metadata: [String: String]
     var debugSelection: [String: String]?
     var visualSummary: String?
-    var videoTranscript: [PanelVideoTranscriptSegment]?
-    var videoFrameSamples: [PanelVideoFrameSample]?
 }
 
 struct PanelStateSnapshot: Codable {

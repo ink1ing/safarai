@@ -266,7 +266,6 @@ final class OpenAICompatibleResponseService {
             if let videoRAGSummary = context.videoRAGSummary, !videoRAGSummary.isEmpty {
                 sections.append("video_rag_signals:\n\(videoRAGSummary)")
             }
-            appendVideoTranscript(context, to: &sections)
         }
 
         if !history.isEmpty {
@@ -288,76 +287,35 @@ final class OpenAICompatibleResponseService {
         selectedFocus: String,
         taskIntent: String
     ) -> Any {
-        let text = buildPrompt(
+        buildPrompt(
             prompt: prompt,
             context: context,
             history: history,
             selectedFocus: selectedFocus,
             taskIntent: taskIntent
         )
-        guard taskIntent == "summarize_video",
-              let frameSamples = context?.videoFrameSamples,
-              !frameSamples.isEmpty
-        else {
-            return text
-        }
-
-        var content: [[String: Any]] = [[
-            "type": "text",
-            "text": text + "\n\nvideo_frame_samples:\n" + frameSamples.prefix(8)
-                .map { "- \($0.timestamp): sampled visible video frame attached." }
-                .joined(separator: "\n")
-        ]]
-        for sample in frameSamples.prefix(8) {
-            content.append([
-                "type": "image_url",
-                "image_url": [
-                    "url": sample.image,
-                    "detail": "low"
-                ]
-            ])
-        }
-        return content
     }
 
-    private func appendVideoTranscript(_ context: PanelContextSnapshot, to sections: inout [String]) {
-        guard let transcript = context.videoTranscript, !transcript.isEmpty else { return }
-        let lines = transcript.prefix(240).map { segment in
-            let end = segment.endSeconds.map { "-\(formatTimestamp($0))" } ?? ""
-            return "[\(segment.timestamp)\(end)] \(segment.text)"
-        }
-        sections.append("video_transcript:\n\(lines.joined(separator: "\n"))")
-    }
+
+
 
     private func appendTaskIntent(_ taskIntent: String, context: PanelContextSnapshot?, to sections: inout [String]) {
         guard taskIntent == "summarize_video" else { return }
-        let transcriptCount = context?.videoTranscript?.count ?? 0
         sections.append("""
-        task_intent: summarize_video
-        output_requirements:
-        - 用 Markdown 输出三个部分：## 整体概览、## 时间线要点、## 适合快速记住的结论。
-        - 时间线要点必须引用可用时间戳，格式如 00:00-02:15：要点。
-        - 融合页面结构、视频标题/描述、章节/重要时刻、评论高信号、字幕和采样画面；优先使用语义密度高的实体、事件、时间和地点。
-        - 评论区只作为“集体注意力信号”，不要把评论当成视频事实，除非视频描述/字幕/画面也支持。
-        - 如果提供了 video_frame_samples，也要结合画面 OCR、人物/场景/镜头变化总结可见信息；时间线可引用采样帧附近的时间戳。
-        - 不要编造字幕或页面中没有的信息。
-        - 如果 video_transcript 为空但 video_frame_samples 不为空，必须先写“未检测到可用时间戳字幕，以下基于采样画面和页面信息总结”。
-        - 如果 video_transcript 与 video_frame_samples 都为空，必须先写“未检测到可用时间戳字幕”，再仅基于标题、简介、可见页面信息做简短总结。
-        video_transcript_count: \(transcriptCount)
-        video_frame_sample_count: \(context?.videoFrameSamples?.count ?? 0)
-        """)
+task_intent: summarize_video
+output_requirements:
+- 用 Markdown 输出三个部分：## 整体概览、## 页面线索、## 适合快速记住的结论。
+- 只能基于当前页面可见或可提取的信息推测视频内容，例如标题、简介、章节/重要时刻、评论高信号、页面结构和元数据。
+- 如果页面提供章节或时间戳线索，可以在“页面线索”中引用这些时间戳；不要声称这些是从视频内部识别出的内容。
+- 评论区只作为“集体注意力信号”，不要把评论当成视频事实。
+- 不要声称已经读取字幕、音频或视频画面；不要编造页面中没有的信息。
+- 开头必须说明：以下总结基于页面内容线索，并非直接读取视频内部内容。
+video_content_basis: page_metadata
+""")
     }
 
-    private func formatTimestamp(_ value: Double) -> String {
-        let seconds = max(0, Int(value.rounded()))
-        let hours = seconds / 3600
-        let minutes = (seconds % 3600) / 60
-        let remaining = seconds % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
-        }
-        return String(format: "%02d:%02d", minutes, remaining)
-    }
+
+
 
     private func buildSystemPrompt() -> String {
         let basePrompt = "你是集成在 Safari 页面里的中文助理。回答必须简洁、准确、面向当前页面任务，不要编造页面中不存在的信息。"

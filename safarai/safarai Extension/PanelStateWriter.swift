@@ -80,7 +80,6 @@ enum PanelStateWriter {
             ],
             "debugSelection": [:],
             "visualSummary": "",
-            "videoTranscript": [],
         ]
     }
 
@@ -165,67 +164,7 @@ enum PanelStateWriter {
             "metadata": metadata,
             "debugSelection": debugSelection,
             "visualSummary": buildVisualSummary(context, metadata: metadata) as Any,
-            "videoTranscript": normalizeVideoTranscript(context["videoTranscript"] as? [[String: Any]]) as Any,
-            "videoFrameSamples": normalizeVideoFrameSamples(context["videoFrameSamples"] as? [[String: Any]]) as Any,
         ]
-    }
-
-    private static func normalizeVideoTranscript(_ items: [[String: Any]]?) -> [[String: Any]] {
-        (items ?? [])
-            .prefix(240)
-            .compactMap { item -> [String: Any]? in
-                let text = String(describing: item["text"] ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { return nil }
-
-                let startSeconds = numericValue(item["startSeconds"]) ?? 0
-                let endSeconds = numericValue(item["endSeconds"])
-                var payload: [String: Any] = [
-                    "startSeconds": startSeconds,
-                    "timestamp": String(describing: item["timestamp"] ?? formatTimestamp(startSeconds)),
-                    "text": String(text.prefix(360)),
-                    "source": String(describing: item["source"] ?? "unknown"),
-                ]
-                if let endSeconds {
-                    payload["endSeconds"] = endSeconds
-                }
-                return payload
-            }
-    }
-
-    private static func normalizeVideoFrameSamples(_ items: [[String: Any]]?) -> [[String: Any]] {
-        (items ?? [])
-            .prefix(8)
-            .compactMap { item -> [String: Any]? in
-                let image = String(describing: item["image"] ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard image.hasPrefix("data:image/") else { return nil }
-
-                let timeSeconds = numericValue(item["timeSeconds"]) ?? 0
-                return [
-                    "timestamp": String(describing: item["timestamp"] ?? formatTimestamp(timeSeconds)),
-                    "timeSeconds": timeSeconds,
-                    "image": image,
-                ]
-            }
-    }
-
-    private static func numericValue(_ value: Any?) -> Double? {
-        if let value = value as? Double { return value }
-        if let value = value as? Int { return Double(value) }
-        if let value = value as? String { return Double(value) }
-        return nil
-    }
-
-    private static func formatTimestamp(_ value: Double) -> String {
-        let seconds = max(0, Int(value.rounded()))
-        let hours = seconds / 3600
-        let minutes = (seconds % 3600) / 60
-        let remaining = seconds % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
-        }
-        return String(format: "%02d:%02d", minutes, remaining)
     }
 
     private static func normalizeMessage(_ item: [String: Any]) -> [String: String] {
